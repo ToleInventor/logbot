@@ -1,113 +1,104 @@
 import pyautogui
 import random
 import time
-import math
 
 pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.01 
+pyautogui.PAUSE = 0.01
 
 
-def get_screen_size():
-    return pyautogui.size()
+def wait_for_target_click():
+    print("\n" + "=" * 60)
+    print("  CLICK THE BUTTON YOU WANT THE BOT TO AUTO-CLICK")
+    print("  The bot will record that exact position.")
+    print("=" * 60)
+    print("Waiting for your click...\n")
 
+    try:
+        from pynput import mouse
+        captured = {}
 
-def random_point(width, height, margin=50):
-    x = random.randint(margin, width - margin)
-    y = random.randint(margin, height - margin)
-    return x, y
+        def on_click(x, y, button, pressed):
+            if pressed and button == mouse.Button.left:
+                captured["x"] = x
+                captured["y"] = y
+                return False
 
+        with mouse.Listener(on_click=on_click) as listener:
+            listener.join()
 
-def smooth_move(target_x, target_y, duration=None):
-    if duration is None:
-        duration = random.uniform(0.3, 1.5)
+        print(f"Target recorded at ({captured['x']}, {captured['y']})\n")
+        return captured["x"], captured["y"]
 
-    start_x, start_y = pyautogui.position()
-
-    ctrl_x = (start_x + target_x) / 2 + random.randint(-200, 200)
-    ctrl_y = (start_y + target_y) / 2 + random.randint(-200, 200)
-
-    steps = max(int(duration * 60), 10)  # ~60 FPS
-
-    for i in range(steps + 1):
-        t = i / steps
-        x = (1 - t) ** 2 * start_x + 2 * (1 - t) * t * ctrl_x + t ** 2 * target_x
-        y = (1 - t) ** 2 * start_y + 2 * (1 - t) * t * ctrl_y + t ** 2 * target_y
-        pyautogui.moveTo(int(x), int(y))
-        time.sleep(duration / steps)
-
-
-def jitter(count=None):
-    if count is None:
-        count = random.randint(5, 25)
-
-    for _ in range(count):
-        dx = random.randint(-4, 4)
-        dy = random.randint(-4, 4)
+    except ImportError:
+        print("(pynput not found - falling back to 'hover and press Enter' mode)")
+        print("Hover your mouse over the button, then press Enter here.")
+        input()
         x, y = pyautogui.position()
-        pyautogui.moveRel(dx, dy, duration=0.02)
+        print(f"Target recorded at ({x}, {y})\n")
+        return x, y
 
 
-def random_scroll():
-    w, h = get_screen_size()
-    x, y = random_point(w, h)
-    smooth_move(x, y, duration=random.uniform(0.2, 0.8))
-
-    time.sleep(random.uniform(0.2, 1.0))
-
-    clicks = random.randint(1, 15)
-    direction = random.choice([-1, 1])
-
-    for _ in range(clicks):
-        pyautogui.scroll(direction * random.randint(50, 300))
-        time.sleep(random.uniform(0.02, 0.15))
+def do_click(x, y):
+    pyautogui.moveTo(x, y, duration=random.uniform(0.2, 0.6))
+    time.sleep(random.uniform(0.1, 0.4))
+    pyautogui.click()
+    print(f"  -> Clicked at ({x}, {y})")
 
 
-def hover(x, y, seconds=None):
-    if seconds is None:
-        seconds = random.uniform(0.5, 3.0)
-    smooth_move(x, y)
-    time.sleep(seconds)
+def sleep_responsive(seconds, end_time):
+    slept = 0.0
+    while slept < seconds:
+        if time.time() >= end_time:
+            return False
+        chunk = min(1.0, seconds - slept)
+        time.sleep(chunk)
+        slept += chunk
+    return True
 
 
-def random_wander(duration_seconds=60):
-    w, h = get_screen_size()
+def run_click_loop(x, y, duration_seconds):
     end_time = time.time() + duration_seconds
+    click_count = 0
+    long_wait = True
 
-    print(f"Bot running for {duration_seconds}s. Slam mouse into a corner to stop.")
+    print("Bot running. Slam mouse into a corner to stop.\n")
 
     while time.time() < end_time:
-        action = random.choices(
-            ["move", "hover", "jitter", "scroll", "rest"],
-            weights=[35, 25, 15, 15, 10],
-            k=1,
-        )[0]
+        if long_wait:
+            wait_seconds = random.randint(10 * 60, 50 * 60)
+            mins = wait_seconds // 60
+            secs = wait_seconds % 60
+            print(f"[Cycle] Waiting {mins}m {secs}s before next click\n")
+        else:
+            wait_seconds = random.uniform(3, 15)
+            print(f"[Cycle] Waiting {wait_seconds:.1f}s before next click\n")
+
+        if not sleep_responsive(wait_seconds, end_time):
+            break
+
+        click_count += 1
+        print(f"[Click #{click_count}]")
 
         try:
-            if action == "move":
-                x, y = random_point(w, h)
-                smooth_move(x, y)
-
-            elif action == "hover":
-                x, y = random_point(w, h)
-                hover(x, y)
-
-            elif action == "jitter":
-                jitter()
-
-            elif action == "scroll":
-                random_scroll()
-
-            elif action == "rest":
-                time.sleep(random.uniform(0.5, 3.0))
-
+            do_click(x, y)
         except pyautogui.FailSafeException:
-            print("Fail-safe triggered. Stopping bot.")
+            print("\nFail-safe triggered. Stopping bot.")
             return
+
+        long_wait = not long_wait
+
+    print(f"\nDone. Total clicks: {click_count}")
 
 
 if __name__ == "__main__":
     try:
-        duration = int(input("Enter duration in hours: "))
-        random_wander(duration_seconds=duration * 3600)
+        duration_hours = float(input("Enter duration in hours: "))
+        target_x, target_y = wait_for_target_click()
+
+        print(f"Starting bot for {duration_hours} hour(s)...")
+        print("Pattern: click -> wait 10-50 min -> click -> wait 3-15s -> repeat\n")
+
+        run_click_loop(target_x, target_y, duration_seconds=duration_hours * 3600)
+
     except KeyboardInterrupt:
         print("\nStopped by user (Ctrl+C).")
