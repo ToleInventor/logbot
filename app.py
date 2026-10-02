@@ -6,36 +6,21 @@ pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.01
 
 
-def wait_for_target_click():
+def get_coordinates_from_user():
     print("\n" + "=" * 60)
-    print("  CLICK THE BUTTON YOU WANT THE BOT TO AUTO-CLICK")
-    print("  The bot will record that exact position.")
+    print("  HOVER OVER THE TARGET BUTTON")
+    print("  Then press Enter here to capture the current mouse position.")
     print("=" * 60)
-    print("Waiting for your click...\n")
 
-    try:
-        from pynput import mouse
-        captured = {}
+    input("\nPress Enter when your mouse is over the button...")
+    x, y = pyautogui.position()
+    print(f"\nCaptured position: ({x}, {y})")
 
-        def on_click(x, y, button, pressed):
-            if pressed and button == mouse.Button.left:
-                captured["x"] = x
-                captured["y"] = y
-                return False
+    confirm = input("Use this position? (y/n): ").strip().lower()
+    if confirm != "y":
+        return get_coordinates_from_user()
 
-        with mouse.Listener(on_click=on_click) as listener:
-            listener.join()
-
-        print(f"Target recorded at ({captured['x']}, {captured['y']})\n")
-        return captured["x"], captured["y"]
-
-    except ImportError:
-        print("(pynput not found - falling back to 'hover and press Enter' mode)")
-        print("Hover your mouse over the button, then press Enter here.")
-        input()
-        x, y = pyautogui.position()
-        print(f"Target recorded at ({x}, {y})\n")
-        return x, y
+    return x, y
 
 
 def do_click(x, y):
@@ -93,12 +78,19 @@ def run_click_loop(x, y, duration_seconds):
 if __name__ == "__main__":
     try:
         duration_hours = float(input("Enter duration in hours: "))
-        target_x, target_y = wait_for_target_click()
 
+        mode = input("Enter coordinates manually or hover-capture? (m/h): ").strip().lower()
+        if mode == "m":
+            x = int(input("Enter X coordinate: "))
+            y = int(input("Enter Y coordinate: "))
+        else:
+            x, y = get_coordinates_from_user()
+
+        print(f"\nTarget set to ({x}, {y})")
         print(f"Starting bot for {duration_hours} hour(s)...")
         print("Pattern: click -> wait 10-50 min -> click -> wait 3-15s -> repeat\n")
 
-        run_click_loop(target_x, target_y, duration_seconds=duration_hours * 3600)
+        run_click_loop(x, y, duration_seconds=duration_hours * 3600)
 
     except KeyboardInterrupt:
         print("\nStopped by user (Ctrl+C).")
