@@ -260,7 +260,7 @@ if __name__ == "__main__":
     monitor.start()
 
     try:
-        duration = int(input("Enter duration in hours: "))
+        duration = float(input("Enter duration in hours: "))
         time.sleep(STARTUP_GRACE)
         random_wander(duration_seconds=duration * 3600, monitor=monitor)
     except KeyboardInterrupt:
