@@ -8,7 +8,8 @@ from pynput import mouse, keyboard
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.01
 
-IDLE_THRESHOLD = 5.0
+IDLE_THRESHOLD = 3.0
+STARTUP_GRACE = 1.0
 
 
 class UserActivityMonitor:
@@ -18,13 +19,22 @@ class UserActivityMonitor:
         self.user_in_control = False
         self._lock = threading.Lock()
         self._listeners = []
+        self._armed = False
 
     def _on_user_input(self, *_args, **_kwargs):
+        if not self._armed:
+            return
         with self._lock:
             self.last_input_time = time.time()
             if not self.user_in_control:
                 self.user_in_control = True
                 print("\n[OVERRIDE] User took control - bot paused.")
+
+    def arm(self):
+        with self._lock:
+            self._armed = True
+            self.last_input_time = 0.0
+            self.user_in_control = False
 
     def start(self):
         kb = keyboard.Listener(
@@ -172,9 +182,24 @@ def sleep_responsive(seconds, end_time, monitor):
     return True
 
 
+def wait_for_idle_start(monitor, end_time):
+    print(f"Waiting for user to be idle for {IDLE_THRESHOLD:.0f}s before starting...")
+    while monitor.user_is_active():
+        if time.time() >= end_time:
+            return False
+        time.sleep(0.05)
+    print("User idle - bot starting.\n")
+    return True
+
+
 def random_wander(duration_seconds=60, monitor=None):
     w, h = get_screen_size()
     end_time = time.time() + duration_seconds
+
+    monitor.arm()
+
+    if not wait_for_idle_start(monitor, end_time):
+        return
 
     print(f"Bot running for {duration_seconds}s. Slam mouse into a corner to stop.")
     print(f"Manual override: any keyboard/mouse input pauses the bot; "
@@ -236,7 +261,7 @@ if __name__ == "__main__":
 
     try:
         duration = int(input("Enter duration in hours: "))
-        time.sleep(1.0)
+        time.sleep(STARTUP_GRACE)
         random_wander(duration_seconds=duration * 3600, monitor=monitor)
     except KeyboardInterrupt:
         print("\nStopped by user (Ctrl+C).")
