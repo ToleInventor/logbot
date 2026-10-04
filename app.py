@@ -1,6 +1,7 @@
 import pyautogui
 import random
 import time
+import math
 import threading
 from pynput import mouse, keyboard
 
@@ -68,41 +69,93 @@ class UserActivityMonitor:
         return True
 
 
-def get_coordinates_from_user(monitor):
-    print("\n" + "=" * 60)
-    print("  HOVER OVER THE TARGET BUTTON")
-    print("  Then press Enter here to capture the current mouse position.")
-    print("=" * 60)
+def get_screen_size():
+    return pyautogui.size()
 
-    input("\nPress Enter when your mouse is over the button...")
-    time.sleep(0.2)
 
-    x, y = pyautogui.position()
-    print(f"\nCaptured position: ({x}, {y})")
-
-    confirm = input("Use this position? (y/n): ").strip().lower()
-    if confirm != "y":
-        return get_coordinates_from_user(monitor)
-
+def random_point(width, height, margin=50):
+    x = random.randint(margin, width - margin)
+    y = random.randint(margin, height - margin)
     return x, y
 
 
-def do_click(x, y, monitor, end_time):
-    if not monitor.wait_until_user_idle(end_time):
+def smooth_move(target_x, target_y, duration=None, monitor=None, end_time=None):
+    if duration is None:
+        duration = random.uniform(0.3, 1.5)
+
+    start_x, start_y = pyautogui.position()
+
+    ctrl_x = (start_x + target_x) / 2 + random.randint(-200, 200)
+    ctrl_y = (start_y + target_y) / 2 + random.randint(-200, 200)
+
+    steps = max(int(duration * 60), 10)
+
+    for i in range(steps + 1):
+        if monitor is not None and end_time is not None:
+            if time.time() >= end_time:
+                return False
+            if monitor.user_is_active():
+                return False
+        t = i / steps
+        x = (1 - t) ** 2 * start_x + 2 * (1 - t) * t * ctrl_x + t ** 2 * target_x
+        y = (1 - t) ** 2 * start_y + 2 * (1 - t) * t * ctrl_y + t ** 2 * target_y
+        pyautogui.moveTo(int(x), int(y))
+        time.sleep(duration / steps)
+    return True
+
+
+def jitter(count=None, monitor=None, end_time=None):
+    if count is None:
+        count = random.randint(5, 25)
+
+    for _ in range(count):
+        if monitor is not None and end_time is not None:
+            if time.time() >= end_time:
+                return False
+            if monitor.user_is_active():
+                return False
+        dx = random.randint(-4, 4)
+        dy = random.randint(-4, 4)
+        pyautogui.moveRel(dx, dy, duration=0.02)
+    return True
+
+
+def random_scroll(monitor=None, end_time=None):
+    w, h = get_screen_size()
+    x, y = random_point(w, h)
+    if not smooth_move(x, y, duration=random.uniform(0.2, 0.8), monitor=monitor, end_time=end_time):
         return False
 
-    pyautogui.moveTo(x, y, duration=random.uniform(0.2, 0.6))
+    if monitor is not None and end_time is not None:
+        if not sleep_responsive(random.uniform(0.2, 1.0), end_time, monitor):
+            return False
+        if monitor.user_is_active():
+            return False
+    else:
+        time.sleep(random.uniform(0.2, 1.0))
 
-    if not monitor.wait_until_user_idle(end_time):
+    clicks = random.randint(1, 15)
+    direction = random.choice([-1, 1])
+
+    for _ in range(clicks):
+        if monitor is not None and end_time is not None:
+            if time.time() >= end_time:
+                return False
+            if monitor.user_is_active():
+                return False
+        pyautogui.scroll(direction * random.randint(50, 300))
+        time.sleep(random.uniform(0.02, 0.15))
+    return True
+
+
+def hover(x, y, seconds=None, monitor=None, end_time=None):
+    if seconds is None:
+        seconds = random.uniform(0.5, 3.0)
+    if not smooth_move(x, y, monitor=monitor, end_time=end_time):
         return False
-
-    time.sleep(random.uniform(0.1, 0.4))
-
-    if not monitor.wait_until_user_idle(end_time):
-        return False
-
-    pyautogui.click()
-    print(f"  -> Clicked at ({x}, {y})")
+    if monitor is not None and end_time is not None:
+        return sleep_responsive(seconds, end_time, monitor)
+    time.sleep(seconds)
     return True
 
 
@@ -119,12 +172,11 @@ def sleep_responsive(seconds, end_time, monitor):
     return True
 
 
-def run_click_loop(x, y, duration_seconds, monitor):
+def random_wander(duration_seconds=60, monitor=None):
+    w, h = get_screen_size()
     end_time = time.time() + duration_seconds
-    click_count = 0
-    long_wait = True
 
-    print("Bot running. Slam mouse into a corner to stop.")
+    print(f"Bot running for {duration_seconds}s. Slam mouse into a corner to stop.")
     print(f"Manual override: any keyboard/mouse input pauses the bot; "
           f"it resumes after {IDLE_THRESHOLD:.0f}s of idle.\n")
 
@@ -133,35 +185,49 @@ def run_click_loop(x, y, duration_seconds, monitor):
         if not monitor.wait_until_user_idle(end_time):
             break
 
-        if long_wait:
-            wait_seconds = random.randint(10 * 60, 50 * 60)
-            mins = wait_seconds // 60
-            secs = wait_seconds % 60
-            print(f"[Cycle] Waiting {mins}m {secs}s before next click\n")
-        else:
-            wait_seconds = random.uniform(3, 15)
-            print(f"[Cycle] Waiting {wait_seconds:.1f}s before next click\n")
-
-        if not sleep_responsive(wait_seconds, end_time, monitor):
-            break
-
         if monitor.user_is_active():
-            print("[OVERRIDE] Skipping click - user is active.\n")
             continue
 
-        click_count += 1
-        print(f"[Click #{click_count}]")
+        action = random.choices(
+            ["move", "hover", "jitter", "scroll", "rest"],
+            weights=[35, 25, 15, 15, 10],
+            k=1,
+        )[0]
 
         try:
-            if not do_click(x, y, monitor, end_time):
-                break
+            if action == "move":
+                x, y = random_point(w, h)
+                if not smooth_move(x, y, monitor=monitor, end_time=end_time):
+                    if time.time() >= end_time:
+                        break
+                    continue
+
+            elif action == "hover":
+                x, y = random_point(w, h)
+                if not hover(x, y, monitor=monitor, end_time=end_time):
+                    if time.time() >= end_time:
+                        break
+                    continue
+
+            elif action == "jitter":
+                if not jitter(monitor=monitor, end_time=end_time):
+                    if time.time() >= end_time:
+                        break
+                    continue
+
+            elif action == "scroll":
+                if not random_scroll(monitor=monitor, end_time=end_time):
+                    if time.time() >= end_time:
+                        break
+                    continue
+
+            elif action == "rest":
+                if not sleep_responsive(random.uniform(0.5, 3.0), end_time, monitor):
+                    break
+
         except pyautogui.FailSafeException:
-            print("\nFail-safe triggered. Stopping bot.")
+            print("Fail-safe triggered. Stopping bot.")
             return
-
-        long_wait = not long_wait
-
-    print(f"\nDone. Total clicks: {click_count}")
 
 
 if __name__ == "__main__":
@@ -169,24 +235,9 @@ if __name__ == "__main__":
     monitor.start()
 
     try:
-        duration_hours = float(input("Enter duration in hours: "))
-
-        mode = input("Enter coordinates manually or hover-capture? (m/h): ").strip().lower()
-        if mode == "m":
-            x = int(input("Enter X coordinate: "))
-            y = int(input("Enter Y coordinate: "))
-        else:
-            x, y = get_coordinates_from_user(monitor)
-
-        print(f"\nTarget set to ({x}, {y})")
-        print(f"Starting bot for {duration_hours} hour(s)...")
-        print("Pattern: click -> wait 10-50 min -> click -> wait 3-15s -> repeat\n")
-        print(">>> Manual override: move the mouse or press a key to take control.")
-        print(">>> Bot resumes 5 seconds after you stop.\n")
-
+        duration = int(input("Enter duration in hours: "))
         time.sleep(1.0)
-        run_click_loop(x, y, duration_seconds=duration_hours * 3600, monitor=monitor)
-
+        random_wander(duration_seconds=duration * 3600, monitor=monitor)
     except KeyboardInterrupt:
         print("\nStopped by user (Ctrl+C).")
     finally:
