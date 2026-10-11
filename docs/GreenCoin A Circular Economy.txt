@@ -1,0 +1,28 @@
+GreenCoin: A Circular Economy Waste Platform
+
+THE PROBLEM
+Kenya faces growing climate crises worsened by poor waste management and low recycling participation.
+
+PROPOSED SOLUTION
+GreenCoin is a digital platform that turns waste management into a rewarding, self-sustaining circular economy. We give people a tangible reason to dispose of their waste responsibly by offering utility tokens in return. In doing so, we connect environmental action with financial opportunity making sustainability not just good for the planet, but good for the wallet.
+
+How It Works
+    • Earn Rewards for Recycling
+Users bring sorted waste to designated collection points, where it is weighed and categorized. In return, they receive GreenCoin tokens according to waste type.
+    • Turn Tokens into Real Money
+We have built a simple, seamless way for users to convert their GreenCoins into local currency so rewards you earn can go straight toward everyday expenses.
+
+    • A Marketplace for Recycled Materials
+Businesses and clients can sell/buy recycled products through the greencoin platform respectively using GreenCoins, creating a closed-loop system where waste becomes a valuable resource.
+
+    • Full Transparency, No Middlemen
+Every transaction is recorded securely on a transparent ledger. This ensures fair and visible pricing, removes unnecessary intermediaries, and allows us to accurately track the environmental impact of every kilogram of waste recycled.
+
+Who Benefits?
+GreenCoin is built for three key groups:
+    • Everyday citizens, who gain a new source of income simply by recycling their household waste. 
+    • Informal waste pickers and sellers, who finally get access to fair, transparent pricing for their work.
+    • Recycling companies and manufacturers, who can secure a reliable, verifiable supply of raw materials to meet their production needs.
+
+What Makes This Different—and Why It Matters
+Unlike traditional recycling initiatives, GreenCoin does not just encourage better habits, it creates real market demand for waste. By allowing users to cash out and enabling businesses to trade materials directly, we treat discarded items as valuable commodities. This shift sparks community-driven action, creates green jobs, and most importantly, helps reduce the municipal waste that fuels climate change starting at the local level and scaling from there.

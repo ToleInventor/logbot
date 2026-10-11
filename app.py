@@ -1073,14 +1073,50 @@ class SessionRunner:
                 if self.monitor.user_is_active():
                     continue
 
-                self.actions.jitter(end_time=app_deadline)
-                self.actions.scroll(random.choice([-1, 1]) * random.randint(50, 300))
-                sleep_responsive(random.uniform(1.0, 3.0), app_deadline, self.monitor)
+                action = random.choice(["browse", "new_folder", "open_file", "rename", "back"])
+
+                try:
+                    if action == "browse":
+                        self.actions.jitter(end_time=app_deadline)
+                        self.actions.scroll(random.choice([-1, 1]) * random.randint(80, 400))
+                        sleep_responsive(random.uniform(0.8, 2.2), app_deadline, self.monitor)
+
+                    elif action == "new_folder":
+                        name = f"folder_{random.randint(1000, 9999)}"
+                        self.actions.hotkey("ctrl", "shift", "n")
+                        sleep_responsive(random.uniform(0.4, 1.0), app_deadline, self.monitor)
+                        self.actions.type_text(name)
+                        sleep_responsive(random.uniform(0.3, 0.8), app_deadline, self.monitor)
+                        self.actions.accept_dialog()
+                        sleep_responsive(random.uniform(0.5, 1.2), app_deadline, self.monitor)
+
+                    elif action == "open_file":
+                        self.actions.hotkey("alt", "up")
+                        sleep_responsive(random.uniform(0.5, 1.2), app_deadline, self.monitor)
+                        self.actions.hotkey("alt", "down")
+                        sleep_responsive(random.uniform(0.5, 1.2), app_deadline, self.monitor)
+                        self.actions.accept_dialog()
+                        sleep_responsive(random.uniform(0.5, 1.5), app_deadline, self.monitor)
+
+                    elif action == "rename":
+                        self.actions.jitter(end_time=app_deadline)
+                        sleep_responsive(random.uniform(0.4, 1.0), app_deadline, self.monitor)
+                        self.actions.hotkey("f2")
+                        sleep_responsive(random.uniform(0.3, 0.8), app_deadline, self.monitor)
+                        self.actions.hotkey("esc")
+
+                    elif action == "back":
+                        self.actions.hotkey("alt", "left")
+                        sleep_responsive(random.uniform(0.5, 1.2), app_deadline, self.monitor)
+                        self.actions.hotkey("alt", "right")
+                        sleep_responsive(random.uniform(0.5, 1.2), app_deadline, self.monitor)
+
+                except Exception as e:
+                    log.debug(f"explorer action '{action}' failed: {e}")
 
         finally:
             if proc is not None:
                 self._maybe_close(proc.pid, "explorer.exe")
-
     def _maybe_close(self, pid: int, exe_name: str) -> None:
         if pid not in self.wm.owned_pids():
             return
