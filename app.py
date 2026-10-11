@@ -29,6 +29,15 @@ pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.01
 
 
+def _base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+BASE = _base_dir()
+
+
 @dataclass
 class Config:
     idle_threshold: float = 3.0
@@ -55,9 +64,12 @@ class Config:
         "ApplicationFrameWindow", "CalcFrame", "MSPaintApp",
         "WordPadClass", "TaskManagerWindow",
     )
-    logbot_dir: Path = Path.home() / "Desktop" / "logbot"
 
-    docs_dir: Path = Path.home() / "Desktop" / "logbot" / "docs"
+    base_dir: Path = BASE
+    logbot_dir: Path = BASE
+    docs_dir: Path = BASE / "docs"
+    log_file: Path = BASE / "logbot.log"
+
     docs_glob: tuple = ("*.txt", "*.md", "*.csv", "*.log", "*.json", "*.rtf")
 
     session_min_apps: int = 1
@@ -76,7 +88,6 @@ class Config:
     typing_hesitation_chance: float = 0.06
     typing_hesitation_min: float = 0.4
     typing_hesitation_max: float = 1.4
-    typing_mistake_chance: float = 0.015
 
     rest_chance: float = 0.15
     rest_min: float = 3.0
@@ -97,7 +108,6 @@ class Config:
     freeze_detection_window: float = 25.0
     freeze_poll_interval: float = 5.0
 
-    log_file: Path = Path.home() / "Desktop" / "logbot" / "logbot.log"
     log_level: int = logging.INFO
 
 
@@ -1117,6 +1127,7 @@ class SessionRunner:
         finally:
             if proc is not None:
                 self._maybe_close(proc.pid, "explorer.exe")
+
     def _maybe_close(self, pid: int, exe_name: str) -> None:
         if pid not in self.wm.owned_pids():
             return
@@ -1156,6 +1167,9 @@ def wait_for_idle_start(monitor: UserActivityMonitor, end_time: float) -> bool:
 def main() -> None:
     log.info("=" * 60)
     log.info("logbot starting")
+    log.info(f"base dir: {CFG.base_dir}")
+    log.info(f"docs dir: {CFG.docs_dir}")
+    log.info(f"log file: {CFG.log_file}")
 
     docs = DocLibrary(CFG.docs_dir, CFG.docs_glob)
     docs.refresh()
