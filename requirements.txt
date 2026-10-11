@@ -1,2 +1,5 @@
 pyautogui
 pynput
+pywinauto
+pygetwindow
+psutil
