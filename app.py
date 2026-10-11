@@ -2,13 +2,15 @@ import os
 import sys
 import time
 import math
+import glob
+import json
 import random
 import threading
 import logging
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Any, Callable, Optional
 
 try:
     import pyautogui
@@ -54,6 +56,34 @@ class Config:
         "WordPadClass", "TaskManagerWindow",
     )
     logbot_dir: Path = Path.home() / "Desktop" / "logbot"
+
+    docs_dir: Path = Path.home() / "Desktop" / "logbot" / "docs"
+    docs_glob: tuple = ("*.txt", "*.md", "*.csv", "*.log", "*.json", "*.rtf")
+
+    session_min_apps: int = 1
+    session_max_apps: int = 3
+    actions_per_app_min: int = 1
+    actions_per_app_max: int = 3
+    app_duration_min: float = 20.0
+    app_duration_max: float = 90.0
+
+    typing_interval_min: float = 0.06
+    typing_interval_max: float = 0.18
+    typing_word_pause_min: float = 0.04
+    typing_word_pause_max: float = 0.22
+    typing_line_pause_min: float = 0.6
+    typing_line_pause_max: float = 1.8
+    typing_hesitation_chance: float = 0.06
+    typing_hesitation_min: float = 0.4
+    typing_hesitation_max: float = 1.4
+    typing_mistake_chance: float = 0.015
+
+    rest_chance: float = 0.15
+    rest_min: float = 3.0
+    rest_max: float = 12.0
+    micro_pause_chance: float = 0.25
+    micro_pause_min: float = 0.15
+    micro_pause_max: float = 0.7
 
     memory_high_watermark: float = 82.0
     memory_low_watermark: float = 65.0
@@ -263,6 +293,54 @@ def random_point(width: int, height: int, margin: int = None):
     return x, y
 
 
+class DocLibrary:
+    def __init__(self, folder: Path, patterns: tuple):
+        self.folder = folder
+        self.patterns = patterns
+        self.folder.mkdir(parents=True, exist_ok=True)
+        self._cache: list = []
+        self._lock = threading.Lock()
+
+    def refresh(self) -> None:
+        files = []
+        for pat in self.patterns:
+            files.extend(Path(p) for p in glob.glob(str(self.folder / pat)))
+        chunks = []
+        for f in files:
+            try:
+                raw = f.read_text(encoding="utf-8", errors="ignore")
+            except Exception as e:
+                log.warning(f"skipping {f.name}: {e}")
+                continue
+            cleaned = " ".join(raw.split())
+            if cleaned:
+                chunks.append(cleaned)
+        with self._lock:
+            self._cache = chunks
+        log.info(f"doc library loaded: {len(chunks)} file(s) from {self.folder}")
+
+    def sample(self, max_chars: int = 400) -> str:
+        with self._lock:
+            if not self._cache:
+                return "logbot placeholder text"
+            chunk = random.choice(self._cache)
+        if len(chunk) <= max_chars:
+            return chunk
+        start = random.randint(0, len(chunk) - max_chars)
+        return chunk[start:start + max_chars]
+
+    def sample_lines(self, n: int = 3, max_chars: int = 200) -> list:
+        text = self.sample(max_chars * n)
+        words = text.split()
+        if not words:
+            return []
+        lines = []
+        for _ in range(n):
+            k = random.randint(4, max(5, max_chars // 6))
+            lines.append(" ".join(random.choices(words, k=k)))
+        return lines
+
+
 class WindowManager:
     def __init__(self, monitor: UserActivityMonitor):
         self.monitor = monitor
@@ -276,6 +354,17 @@ class WindowManager:
     def mark_opened(self, pid: int) -> None:
         with self._lock:
             self._opened_by_bot.add(pid)
+
+    def forget(self, pid: int) -> None:
+        with self._lock:
+            self._opened_by_bot.discard(pid)
+
+    def is_alive(self, pid: int) -> bool:
+        try:
+            p = psutil.Process(pid)
+            return p.is_running() and p.status() != psutil.STATUS_ZOMBIE
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
 
     def launch(self, exe: str, args: Optional[list] = None) -> subprocess.Popen:
         SafetyGuard.assert_safe_exe(exe)
@@ -365,6 +454,25 @@ class Actions:
                 log.warning(f"{label} failed: {e}")
                 raise
 
+    def _type_delay(self) -> float:
+        return random.uniform(CFG.typing_interval_min, CFG.typing_interval_max)
+
+    def _maybe_hesitate(self, end_time: Optional[float] = None) -> None:
+        if random.random() < CFG.typing_hesitation_chance:
+            pause = random.uniform(CFG.typing_hesitation_min, CFG.typing_hesitation_max)
+            if end_time is None:
+                time.sleep(pause)
+            else:
+                sleep_responsive(pause, end_time, self.monitor)
+
+    def _maybe_micro_pause(self, end_time: Optional[float] = None) -> None:
+        if random.random() < CFG.micro_pause_chance:
+            pause = random.uniform(CFG.micro_pause_min, CFG.micro_pause_max)
+            if end_time is None:
+                time.sleep(pause)
+            else:
+                sleep_responsive(pause, end_time, self.monitor)
+
     def smooth_move(self,
                     target_x: int,
                     target_y: int,
@@ -399,13 +507,59 @@ class Actions:
         self._guarded(_do, "click_control")
 
     def type_text(self, text: str) -> None:
-        self._guarded(lambda: pyautogui.typewrite(text, interval=0.03), "type_text")
+        def _do():
+            for ch in text:
+                pyautogui.write(ch, interval=0)
+                time.sleep(self._type_delay())
+                if ch == " ":
+                    time.sleep(random.uniform(
+                        CFG.typing_word_pause_min, CFG.typing_word_pause_max
+                    ))
+                if ch in ".,;:!?":
+                    time.sleep(random.uniform(0.15, 0.45))
+                self._maybe_hesitate()
+        self._guarded(_do, "type_text")
 
-    def type_into_control(self, control, text: str) -> None:
+    def type_into_control(self, control, text: str, end_time: Optional[float] = None) -> None:
         def _do():
             control.wait("visible enabled ready", timeout=CFG.control_timeout)
             control.set_focus()
-            control.type_keys(text, with_spaces=True, with_newlines=True)
+            buf = []
+            for ch in text:
+                if end_time is not None and time.time() >= end_time:
+                    break
+                if self.monitor.user_is_active():
+                    break
+                if ch == "\n":
+                    if buf:
+                        control.type_keys(
+                            "".join(buf),
+                            with_spaces=True, with_newlines=False,
+                        )
+                        buf = []
+                    control.type_keys("{ENTER}", with_newlines=False)
+                    time.sleep(random.uniform(
+                        CFG.typing_line_pause_min, CFG.typing_line_pause_max
+                    ))
+                    continue
+                buf.append(ch)
+                if ch == " ":
+                    control.type_keys(" ", with_spaces=True, with_newlines=False)
+                    buf = []
+                    time.sleep(random.uniform(
+                        CFG.typing_word_pause_min, CFG.typing_word_pause_max
+                    ))
+                    self._maybe_micro_pause(end_time)
+                elif ch in ".,;:!?":
+                    control.type_keys(ch, with_spaces=True, with_newlines=False)
+                    buf = []
+                    time.sleep(random.uniform(0.2, 0.55))
+                else:
+                    control.type_keys(ch, with_spaces=True, with_newlines=False)
+                    time.sleep(self._type_delay())
+                    self._maybe_hesitate(end_time)
+            if buf:
+                control.type_keys("".join(buf), with_spaces=True, with_newlines=False)
         self._guarded(_do, "type_into_control")
 
     def hotkey(self, *keys: str) -> None:
@@ -510,8 +664,7 @@ class ResourceManager:
                 mem_mb = p.memory_info().rss / (1024 * 1024)
                 procs.append((mem_mb, pid, p.name()))
             except (psutil.NoSuchProcess, psutil.AccessDenied):
-                with self.wm._lock:
-                    self.wm._opened_by_bot.discard(pid)
+                self.wm.forget(pid)
         procs.sort(reverse=True)
         target_mem = CFG.memory_low_watermark
         for mem_mb, pid, name in procs:
@@ -535,8 +688,7 @@ class ResourceManager:
                 p = psutil.Process(pid)
                 self._safe_terminate(pid, p.name())
             except (psutil.NoSuchProcess, psutil.AccessDenied):
-                with self.wm._lock:
-                    self.wm._opened_by_bot.discard(pid)
+                self.wm.forget(pid)
 
     def _safe_terminate(self, pid: int, name: str) -> None:
         if CFG.protect_own_pid and pid == self.self_pid:
@@ -556,8 +708,7 @@ class ResourceManager:
         except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
             log.debug(f"terminate {pid} skipped: {e}")
         finally:
-            with self.wm._lock:
-                self.wm._opened_by_bot.discard(pid)
+            self.wm.forget(pid)
 
 
 class FreezeGuard:
@@ -567,7 +718,6 @@ class FreezeGuard:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_tick = time.time()
-        self._last_heartbeat = time.time()
 
     def heartbeat(self) -> None:
         self._last_tick = time.time()
@@ -669,11 +819,13 @@ class Workflows:
                  monitor: UserActivityMonitor,
                  wm: WindowManager,
                  actions: Actions,
-                 engine: WorkflowEngine):
+                 engine: WorkflowEngine,
+                 docs: DocLibrary):
         self.monitor = monitor
         self.wm = wm
         self.actions = actions
         self.engine = engine
+        self.docs = docs
 
     def wander(self, duration_seconds: float) -> None:
         w, h = get_screen_size()
@@ -710,90 +862,249 @@ class Workflows:
                 log.info("fail-safe triggered")
                 return
 
-    def notepad_session(self, duration_seconds: float) -> None:
-        proc = self.wm.launch("notepad.exe")
-        try:
-            win = self.wm.wait_for_window(r".*Notepad.*", process_id=proc.pid)
-        except TimeoutError as e:
-            log.error(f"notepad did not open: {e}")
-            return
-        self.wm.activate(win)
-        self.wm.maximize(win)
 
-        edit = None
-        try:
-            edit = win.child_window(control_type="Edit")
-            edit.wait("visible enabled ready", timeout=CFG.control_timeout)
-        except Exception as e:
-            log.warning(f"could not resolve edit control: {e}")
+class SessionRunner:
+    def __init__(self,
+                 monitor: UserActivityMonitor,
+                 wm: WindowManager,
+                 actions: Actions,
+                 engine: WorkflowEngine,
+                 docs: DocLibrary):
+        self.monitor = monitor
+        self.wm = wm
+        self.actions = actions
+        self.engine = engine
+        self.docs = docs
 
+        self._recipes = {
+            "notepad": self._run_notepad,
+            "explorer": self._run_explorer,
+        }
+
+    def _available_recipes(self) -> list:
+        return list(self._recipes.keys())
+
+    def _maybe_rest(self, end_time: float) -> None:
+        if random.random() < CFG.rest_chance:
+            pause = random.uniform(CFG.rest_min, CFG.rest_max)
+            log.info(f"taking a rest for {pause:.1f}s")
+            sleep_responsive(pause, end_time, self.monitor)
+
+    def run(self, duration_seconds: float) -> None:
         end_time = time.time() + duration_seconds
-        lines = [
-            "logbot session start",
-            f"timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-            "human supervised automation",
-        ]
-        for line in lines:
-            if time.time() >= end_time or self.engine.stopped():
-                break
-            if self.monitor.user_is_active():
-                self.monitor.wait_until_user_idle(end_time)
-                continue
-            if edit is not None:
-                self.engine.run_step(
-                    f"type '{line[:20]}'",
-                    lambda l=line: self.actions.type_into_control(edit, l + "\n"),
-                )
-            else:
-                self.engine.run_step(
-                    f"type '{line[:20]}'",
-                    lambda l=line: self.actions.type_text(l + "\n"),
-                )
-            sleep_responsive(random.uniform(0.4, 1.2), end_time, self.monitor)
+        log.info("session runner started")
 
-        if self.engine.stopped():
-            return
-
-        out = SafetyGuard.resolve_path(CFG.logbot_dir / f"session_{int(time.time())}.txt")
-
-        def _save():
-            self.actions.open_save_as_dialog()
-            time.sleep(0.8)
-            self.actions.type_text(str(out))
-            time.sleep(0.3)
-            self.actions.accept_dialog()
-
-        def _verify():
-            return out.exists()
-
-        self.engine.run_step("save as", _save, verify=_verify, timeout=10)
-
-        if not out.exists():
-            log.warning("save verification failed; leaving notepad open for inspection")
-
-    def explorer_session(self, duration_seconds: float) -> None:
-        target = CFG.logbot_dir
-        target.mkdir(parents=True, exist_ok=True)
-        proc = self.wm.launch("explorer.exe", [str(target)])
-        try:
-            win = self.wm.wait_for_window(r".*logbot.*", process_id=proc.pid, timeout=10)
-        except TimeoutError:
-            try:
-                win = self.wm.wait_for_window(r".*logbot.*", timeout=10)
-            except TimeoutError as e:
-                log.error(f"explorer window not found: {e}")
-                return
-        self.wm.activate(win)
-        self.wm.maximize(win)
-
-        end_time = time.time() + duration_seconds
         while time.time() < end_time and not self.engine.stopped():
             if not self.monitor.wait_until_user_idle(end_time):
                 break
             if self.monitor.user_is_active():
                 continue
-            self.actions.jitter(end_time=end_time)
-            sleep_responsive(random.uniform(1.0, 3.0), end_time, self.monitor)
+
+            apps_this_session = random.randint(
+                CFG.session_min_apps, CFG.session_max_apps
+            )
+            choices = random.sample(
+                self._available_recipes(),
+                k=min(apps_this_session, len(self._recipes)),
+            )
+            log.info(f"session plan: {choices}")
+
+            for app_name in choices:
+                if time.time() >= end_time or self.engine.stopped():
+                    break
+                if not self.monitor.wait_until_user_idle(end_time):
+                    break
+                try:
+                    self._recipes[app_name](end_time)
+                except Exception as e:
+                    log.warning(f"recipe '{app_name}' raised: {e}")
+                self._maybe_rest(end_time)
+
+            sleep_responsive(random.uniform(2.0, 6.0), end_time, self.monitor)
+
+        log.info("session runner finished")
+
+    def _pick_duration(self) -> float:
+        return random.uniform(CFG.app_duration_min, CFG.app_duration_max)
+
+    def _run_notepad(self, end_time: float) -> None:
+        app_deadline = min(end_time, time.time() + self._pick_duration())
+        log.info("entering notepad recipe")
+
+        proc = None
+        try:
+            proc = self.wm.launch("notepad.exe")
+            try:
+                win = self.wm.wait_for_window(r".*Notepad.*", process_id=proc.pid)
+            except TimeoutError as e:
+                log.error(f"notepad did not open: {e}")
+                return
+
+            self.wm.activate(win)
+            self.wm.maximize(win)
+
+            edit = None
+            try:
+                edit = win.child_window(control_type="Edit")
+                edit.wait("visible enabled ready", timeout=CFG.control_timeout)
+            except Exception as e:
+                log.warning(f"edit control not resolved: {e}")
+
+            n_actions = random.randint(
+                CFG.actions_per_app_min, CFG.actions_per_app_max
+            )
+            log.info(f"notepad: performing {n_actions} action block(s)")
+
+            for block in range(n_actions):
+                if time.time() >= app_deadline or self.engine.stopped():
+                    break
+                if not self.monitor.wait_until_user_idle(app_deadline):
+                    break
+                if not self.wm.is_alive(proc.pid):
+                    log.info("notepad was closed by user - ending recipe cleanly")
+                    self.wm.forget(proc.pid)
+                    return
+
+                lines = self.docs.sample_lines(n=random.randint(2, 5))
+                if not lines:
+                    lines = ["logbot placeholder"]
+
+                for line in lines:
+                    if time.time() >= app_deadline or self.engine.stopped():
+                        break
+                    if not self.wm.is_alive(proc.pid):
+                        log.info("notepad was closed by user mid-typing - stopping recipe")
+                        self.wm.forget(proc.pid)
+                        return
+                    if self.monitor.user_is_active():
+                        self.monitor.wait_until_user_idle(app_deadline)
+                        continue
+
+                    text = line + "\n"
+                    if edit is not None:
+                        ok = self.engine.run_step(
+                            f"notepad type block {block+1}",
+                            lambda t=text: self.actions.type_into_control(edit, t, app_deadline),
+                        )
+                        if not ok and not self.wm.is_alive(proc.pid):
+                            self.wm.forget(proc.pid)
+                            return
+                    else:
+                        ok = self.engine.run_step(
+                            f"notepad type block {block+1}",
+                            lambda t=text: self.actions.type_text(t),
+                        )
+                        if not ok and not self.wm.is_alive(proc.pid):
+                            self.wm.forget(proc.pid)
+                            return
+
+                    sleep_responsive(
+                        random.uniform(CFG.typing_line_pause_min, CFG.typing_line_pause_max),
+                        app_deadline,
+                        self.monitor,
+                    )
+
+                sleep_responsive(random.uniform(1.0, 3.0), app_deadline, self.monitor)
+
+            if not self.engine.stopped() and time.time() < app_deadline:
+                if self.wm.is_alive(proc.pid):
+                    out = SafetyGuard.resolve_path(
+                        CFG.logbot_dir / f"note_{int(time.time())}.txt"
+                    )
+
+                    def _save():
+                        self.actions.open_save_as_dialog()
+                        time.sleep(0.8)
+                        self.actions.type_text(str(out))
+                        time.sleep(0.3)
+                        self.actions.accept_dialog()
+
+                    self.engine.run_step(
+                        "notepad save as",
+                        _save,
+                        verify=lambda: out.exists(),
+                        timeout=10,
+                    )
+                else:
+                    log.info("notepad closed by user before save - skipping save")
+
+        finally:
+            if proc is not None:
+                self._maybe_close(proc.pid, "notepad.exe")
+
+    def _run_explorer(self, end_time: float) -> None:
+        app_deadline = min(end_time, time.time() + self._pick_duration())
+        log.info("entering explorer recipe")
+
+        target = CFG.logbot_dir
+        target.mkdir(parents=True, exist_ok=True)
+
+        proc = None
+        try:
+            proc = self.wm.launch("explorer.exe", [str(target)])
+            try:
+                win = self.wm.wait_for_window(
+                    r".*logbot.*", process_id=proc.pid, timeout=10
+                )
+            except TimeoutError:
+                try:
+                    win = self.wm.wait_for_window(r".*logbot.*", timeout=10)
+                except TimeoutError as e:
+                    log.error(f"explorer window not found: {e}")
+                    return
+
+            self.wm.activate(win)
+            self.wm.maximize(win)
+
+            n_actions = random.randint(
+                CFG.actions_per_app_min, CFG.actions_per_app_max
+            )
+            log.info(f"explorer: performing {n_actions} action block(s)")
+
+            for block in range(n_actions):
+                if time.time() >= app_deadline or self.engine.stopped():
+                    break
+                if not self.monitor.wait_until_user_idle(app_deadline):
+                    break
+                if not self.wm.is_alive(proc.pid):
+                    log.info("explorer was closed by user - ending recipe cleanly")
+                    self.wm.forget(proc.pid)
+                    return
+                if self.monitor.user_is_active():
+                    continue
+
+                self.actions.jitter(end_time=app_deadline)
+                self.actions.scroll(random.choice([-1, 1]) * random.randint(50, 300))
+                sleep_responsive(random.uniform(1.0, 3.0), app_deadline, self.monitor)
+
+        finally:
+            if proc is not None:
+                self._maybe_close(proc.pid, "explorer.exe")
+
+    def _maybe_close(self, pid: int, exe_name: str) -> None:
+        if pid not in self.wm.owned_pids():
+            return
+        if pid == os.getpid():
+            return
+        if not self.wm.is_alive(pid):
+            log.info(f"{exe_name} pid={pid} already gone - nothing to close")
+            self.wm.forget(pid)
+            return
+        try:
+            p = psutil.Process(pid)
+            if not SafetyGuard.is_safe_exe(p.name()):
+                self.wm.forget(pid)
+                return
+            log.info(f"closing {exe_name} pid={pid}")
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except psutil.TimeoutExpired:
+                p.kill()
+        except Exception as e:
+            log.debug(f"close {pid} skipped: {e}")
+        finally:
+            self.wm.forget(pid)
 
 
 def wait_for_idle_start(monitor: UserActivityMonitor, end_time: float) -> bool:
@@ -810,13 +1121,17 @@ def main() -> None:
     log.info("=" * 60)
     log.info("logbot starting")
 
+    docs = DocLibrary(CFG.docs_dir, CFG.docs_glob)
+    docs.refresh()
+
     monitor = UserActivityMonitor()
     wm = WindowManager(monitor)
     actions = Actions(monitor, wm)
     freeze_guard = FreezeGuard(monitor, actions)
     engine = WorkflowEngine(monitor, wm, actions, freeze_guard)
     resources = ResourceManager(monitor, wm)
-    workflows = Workflows(monitor, wm, actions, engine)
+    workflows = Workflows(monitor, wm, actions, engine, docs)
+    runner = SessionRunner(monitor, wm, actions, engine, docs)
 
     monitor.start()
     freeze_guard.start()
@@ -824,7 +1139,6 @@ def main() -> None:
 
     try:
         duration_hours = float(input("Enter duration in hours: "))
-        mode = input("Mode: (1) wander  (2) notepad  (3) explorer  [1]: ").strip() or "1"
         duration_seconds = duration_hours * 3600
         end_time = time.time() + duration_seconds
 
@@ -835,12 +1149,7 @@ def main() -> None:
             log.info("aborted before start")
             return
 
-        if mode == "2":
-            workflows.notepad_session(duration_seconds)
-        elif mode == "3":
-            workflows.explorer_session(duration_seconds)
-        else:
-            workflows.wander(duration_seconds)
+        runner.run(duration_seconds)
 
     except KeyboardInterrupt:
         log.info("interrupted by user")
