@@ -8,6 +8,9 @@ import random
 import threading
 import logging
 import subprocess
+import queue
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -40,7 +43,8 @@ BASE = _base_dir()
 
 @dataclass
 class Config:
-    idle_threshold: float = 3.0
+    idle_threshold: float = 1.2
+    input_poll_interval: float = 0.03
     startup_grace: float = 1.0
     poll_interval: float = 0.15
     window_timeout: float = 15.0
@@ -49,20 +53,15 @@ class Config:
     action_retry_delay: float = 0.6
 
     wander_weights: dict = field(default_factory=lambda: {
-        "move": 35, "hover": 25, "jitter": 15, "scroll": 15, "rest": 10,
+        "move": 30, "hover": 25, "jitter": 15, "scroll": 10,
+        "click_empty": 10, "rest": 10,
     })
     margin: int = 50
 
     allow_free_roam: bool = False
-    whitelisted_apps: tuple = (
-        "notepad.exe", "explorer.exe", "calc.exe", "CalculatorApp.exe",
-        "Calculator.exe", "mspaint.exe", "write.exe", "wordpad.exe",
-        "taskmgr.exe",
-    )
+    whitelisted_apps: tuple = ("notepad.exe", "explorer.exe")
     whitelisted_window_classes: tuple = (
         "Notepad", "CabinetWClass", "ExploreWClass",
-        "ApplicationFrameWindow", "CalcFrame", "MSPaintApp",
-        "WordPadClass", "TaskManagerWindow",
     )
 
     base_dir: Path = BASE
@@ -73,11 +72,11 @@ class Config:
     docs_glob: tuple = ("*.txt", "*.md", "*.csv", "*.log", "*.json", "*.rtf")
 
     session_min_apps: int = 1
-    session_max_apps: int = 3
+    session_max_apps: int = 2
     actions_per_app_min: int = 1
     actions_per_app_max: int = 3
-    app_duration_min: float = 20.0
-    app_duration_max: float = 90.0
+    app_duration_min: float = 15.0
+    app_duration_max: float = 45.0
 
     typing_interval_min: float = 0.06
     typing_interval_max: float = 0.18
@@ -89,12 +88,22 @@ class Config:
     typing_hesitation_min: float = 0.4
     typing_hesitation_max: float = 1.4
 
-    rest_chance: float = 0.15
+    rest_chance: float = 0.20
     rest_min: float = 3.0
     rest_max: float = 12.0
     micro_pause_chance: float = 0.25
     micro_pause_min: float = 0.15
     micro_pause_max: float = 0.7
+
+    hover_break_chance: float = 0.25
+    hover_break_min_points: int = 2
+    hover_break_max_points: int = 6
+    hover_break_dwell_min: float = 0.4
+    hover_break_dwell_max: float = 2.5
+    hover_break_idle_min: float = 5.0
+    hover_break_idle_max: float = 20.0
+
+    click_empty_chance: float = 0.35
 
     memory_high_watermark: float = 82.0
     memory_low_watermark: float = 65.0
@@ -102,7 +111,7 @@ class Config:
     cpu_sample_interval: float = 4.0
     resource_check_interval: float = 20.0
     min_free_memory_percent: float = 15.0
-    max_sandboxed_apps: int = 2
+    max_sandboxed_apps: int = 1
     protect_own_pid: bool = True
 
     freeze_detection_window: float = 25.0
@@ -112,6 +121,22 @@ class Config:
 
 
 CFG = Config()
+
+
+class UiLogQueue(logging.Handler):
+    def __init__(self, q: "queue.Queue[str]"):
+        super().__init__()
+        self.q = q
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+        except Exception:
+            return
+        try:
+            self.q.put_nowait(msg)
+        except Exception:
+            pass
 
 
 class Logger:
@@ -175,9 +200,7 @@ class SafetyGuard:
         if window_class and window_class in CFG.whitelisted_window_classes:
             return True
         title = (title or "").lower()
-        keywords = ("notepad", "file explorer", "calculator", "paint",
-                    "wordpad", "task manager")
-        return any(k in title for k in keywords)
+        return ("notepad" in title) or ("file explorer" in title) or ("explorer" in title)
 
     @staticmethod
     def assert_safe_exe(exe: str) -> None:
@@ -234,7 +257,7 @@ class UserActivityMonitor:
             self.last_input_time = time.time()
             if not self.user_in_control:
                 self.user_in_control = True
-                log.info("user took control - bot paused")
+                log.info("user took control - bot pausing")
 
     def start(self) -> None:
         kb = pynput_keyboard.Listener(
@@ -273,7 +296,7 @@ class UserActivityMonitor:
                 return False
             if not was_active:
                 was_active = True
-            time.sleep(0.05)
+            time.sleep(CFG.input_poll_interval)
         if was_active:
             log.info("user idle - bot resuming")
         return True
@@ -286,7 +309,7 @@ def sleep_responsive(seconds: float, end_time: float, monitor: UserActivityMonit
             return False
         if monitor.user_is_active():
             return True
-        chunk = min(0.25, seconds - slept)
+        chunk = min(CFG.input_poll_interval, seconds - slept)
         time.sleep(chunk)
         slept += chunk
     return True
@@ -376,6 +399,13 @@ class WindowManager:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
 
+    def kill_window(self, window) -> None:
+        try:
+            window.close()
+            log.info("sent close to window")
+        except Exception as e:
+            log.debug(f"window close failed: {e}")
+
     def launch(self, exe: str, args: Optional[list] = None) -> subprocess.Popen:
         SafetyGuard.assert_safe_exe(exe)
         args = args or []
@@ -437,18 +467,6 @@ class WindowManager:
                     pyautogui.hotkey("win", "up")
                 except Exception as e:
                     log.debug(f"maximize fallback failed: {e}")
-
-    def is_visible(self, window) -> bool:
-        try:
-            return bool(window.is_visible())
-        except Exception:
-            return False
-
-    def is_ready(self, window) -> bool:
-        try:
-            return bool(window.is_visible() and window.is_enabled())
-        except Exception:
-            return False
 
 
 class Actions:
@@ -596,6 +614,37 @@ class Actions:
                 pyautogui.moveRel(dx, dy, duration=0.02)
         return True
 
+    def hover_around(self, end_time: float) -> bool:
+        w, h = get_screen_size()
+        n_points = random.randint(
+            CFG.hover_break_min_points, CFG.hover_break_max_points
+        )
+        log.info(f"hover break: {n_points} random point(s)")
+        for _ in range(n_points):
+            if time.time() >= end_time:
+                return False
+            if not self.monitor.wait_until_user_idle(end_time):
+                return False
+            x, y = random_point(w, h)
+            if not self.smooth_move(x, y, end_time=end_time):
+                return False
+            dwell = random.uniform(
+                CFG.hover_break_dwell_min, CFG.hover_break_dwell_max
+            )
+            sleep_responsive(dwell, end_time, self.monitor)
+            if random.random() < CFG.click_empty_chance:
+                try:
+                    self.click_at(x, y)
+                except Exception:
+                    pass
+                sleep_responsive(random.uniform(0.3, 1.0), end_time, self.monitor)
+        idle_for = random.uniform(
+            CFG.hover_break_idle_min, CFG.hover_break_idle_max
+        )
+        log.info(f"hover break: idle {idle_for:.1f}s")
+        sleep_responsive(idle_for, end_time, self.monitor)
+        return True
+
     def open_save_dialog(self) -> None:
         self.hotkey("ctrl", "s")
 
@@ -613,6 +662,9 @@ class Actions:
 
     def open_task_manager(self) -> None:
         self.hotkey("ctrl", "shift", "esc")
+
+    def close_active_window(self) -> None:
+        self.hotkey("alt", "f4")
 
 
 class ResourceManager:
@@ -829,13 +881,11 @@ class Workflows:
                  monitor: UserActivityMonitor,
                  wm: WindowManager,
                  actions: Actions,
-                 engine: WorkflowEngine,
-                 docs: DocLibrary):
+                 engine: WorkflowEngine):
         self.monitor = monitor
         self.wm = wm
         self.actions = actions
         self.engine = engine
-        self.docs = docs
 
     def wander(self, duration_seconds: float) -> None:
         w, h = get_screen_size()
@@ -859,15 +909,31 @@ class Workflows:
                 elif action == "hover":
                     x, y = random_point(w, h)
                     if self.actions.smooth_move(x, y, end_time=end_time):
-                        sleep_responsive(random.uniform(0.5, 3.0), end_time, self.monitor)
+                        sleep_responsive(
+                            random.uniform(0.5, 3.0), end_time, self.monitor
+                        )
                 elif action == "jitter":
                     self.actions.jitter(end_time=end_time)
                 elif action == "scroll":
                     x, y = random_point(w, h)
                     if self.actions.smooth_move(x, y, end_time=end_time):
-                        self.actions.scroll(random.choice([-1, 1]) * random.randint(50, 300))
+                        self.actions.scroll(
+                            random.choice([-1, 1]) * random.randint(50, 300)
+                        )
+                elif action == "click_empty":
+                    x, y = random_point(w, h)
+                    if self.actions.smooth_move(x, y, end_time=end_time):
+                        sleep_responsive(
+                            random.uniform(0.2, 0.8), end_time, self.monitor
+                        )
+                        try:
+                            self.actions.click_at(x, y)
+                        except Exception:
+                            pass
                 elif action == "rest":
-                    sleep_responsive(random.uniform(0.5, 3.0), end_time, self.monitor)
+                    sleep_responsive(
+                        random.uniform(0.5, 3.0), end_time, self.monitor
+                    )
             except pyautogui.FailSafeException:
                 log.info("fail-safe triggered")
                 return
@@ -879,11 +945,13 @@ class SessionRunner:
                  wm: WindowManager,
                  actions: Actions,
                  engine: WorkflowEngine,
+                 workflows: Workflows,
                  docs: DocLibrary):
         self.monitor = monitor
         self.wm = wm
         self.actions = actions
         self.engine = engine
+        self.workflows = workflows
         self.docs = docs
 
         self._recipes = {
@@ -900,6 +968,11 @@ class SessionRunner:
             log.info(f"taking a rest for {pause:.1f}s")
             sleep_responsive(pause, end_time, self.monitor)
 
+    def _maybe_hover_break(self, end_time: float) -> None:
+        if random.random() < CFG.hover_break_chance:
+            log.info("starting hover break")
+            self.actions.hover_around(end_time)
+
     def run(self, duration_seconds: float) -> None:
         end_time = time.time() + duration_seconds
         log.info("session runner started")
@@ -909,6 +982,11 @@ class SessionRunner:
                 break
             if self.monitor.user_is_active():
                 continue
+
+            self._maybe_hover_break(end_time)
+
+            if time.time() >= end_time or self.engine.stopped():
+                break
 
             apps_this_session = random.randint(
                 CFG.session_min_apps, CFG.session_max_apps
@@ -1154,65 +1232,441 @@ class SessionRunner:
             self.wm.forget(pid)
 
 
-def wait_for_idle_start(monitor: UserActivityMonitor, end_time: float) -> bool:
-    log.info(f"waiting for {CFG.idle_threshold:.0f}s idle before starting")
-    while monitor.user_is_active():
-        if time.time() >= end_time:
-            return False
-        time.sleep(0.05)
-    log.info("idle confirmed - starting")
-    return True
+class BotController:
+    def __init__(self, log_queue: "queue.Queue[str]"):
+        self.log_queue = log_queue
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._monitor: Optional[UserActivityMonitor] = None
+        self._engine: Optional[WorkflowEngine] = None
+        self._resources: Optional[ResourceManager] = None
+        self._freeze_guard: Optional[FreezeGuard] = None
+        self._state = "idle"
+
+    def state(self) -> str:
+        return self._state
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self, duration_hours: float, mode: str) -> None:
+        if self.is_running():
+            return
+        self._stop_event.clear()
+        self._state = "starting"
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(duration_hours, mode),
+            name="BotWorker",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._engine is not None:
+            self._engine.stop()
+        self._state = "stopping"
+
+    def _run(self, duration_hours: float, mode: str) -> None:
+        try:
+            self._state = "running"
+            docs = DocLibrary(CFG.docs_dir, CFG.docs_glob)
+            docs.refresh()
+
+            self._monitor = UserActivityMonitor()
+            wm = WindowManager(self._monitor)
+            actions = Actions(self._monitor, wm)
+            self._freeze_guard = FreezeGuard(self._monitor, actions)
+            self._engine = WorkflowEngine(self._monitor, wm, actions, self._freeze_guard)
+            self._resources = ResourceManager(self._monitor, wm)
+            workflows = Workflows(self._monitor, wm, actions, self._engine)
+            runner = SessionRunner(
+                self._monitor, wm, actions, self._engine, workflows, docs
+            )
+
+            self._monitor.start()
+            self._freeze_guard.start()
+            self._resources.start()
+
+            duration_seconds = duration_hours * 3600
+            end_time = time.time() + duration_seconds
+
+            time.sleep(CFG.startup_grace)
+            self._monitor.arm()
+
+            log.info(f"waiting for {CFG.idle_threshold:.0f}s idle before starting")
+            while self._monitor.user_is_active():
+                if time.time() >= end_time or self._stop_event.is_set():
+                    log.info("aborted before start")
+                    return
+                time.sleep(CFG.input_poll_interval)
+            log.info("idle confirmed - starting")
+
+            if self._stop_event.is_set():
+                return
+
+            if mode == "wander":
+                workflows.wander(duration_seconds)
+            else:
+                runner.run(duration_seconds)
+
+        except SafetyViolation as e:
+            log.error(f"safety violation: {e}")
+        except Exception as e:
+            log.exception(f"fatal: {e}")
+        finally:
+            try:
+                if self._engine is not None:
+                    self._engine.stop()
+                if self._resources is not None:
+                    self._resources.stop()
+                if self._freeze_guard is not None:
+                    self._freeze_guard.stop()
+                if self._monitor is not None:
+                    self._monitor.stop()
+            except Exception:
+                pass
+            self._state = "idle"
+            log.info("logbot stopped")
+
+
+class LogbotApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("LogBot — Human-Supervised Desktop Automation")
+        self.geometry("980x680")
+        self.minsize(820, 560)
+        self.configure(bg="#1e1f22")
+
+        self._log_queue: "queue.Queue[str]" = queue.Queue()
+        self._ui_log_handler = UiLogQueue(self._log_queue)
+        self._ui_log_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        log.addHandler(self._ui_log_handler)
+
+        self._controller = BotController(self._log_queue)
+
+        self._build_style()
+        self._build_layout()
+        self._wire_events()
+
+        self.after(100, self._drain_log_queue)
+        self.after(250, self._update_status)
+
+        log.info(f"base dir: {CFG.base_dir}")
+        log.info(f"docs dir: {CFG.docs_dir}")
+        log.info(f"log file: {CFG.log_file}")
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _build_style(self):
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        bg = "#1e1f22"
+        fg = "#e6e6e6"
+        accent = "#4a9eff"
+        accent_hover = "#6fb4ff"
+        panel = "#2a2c30"
+        border = "#3a3d43"
+
+        style.configure(".", background=bg, foreground=fg, fieldbackground=panel)
+        style.configure("TFrame", background=bg)
+        style.configure("TLabel", background=bg, foreground=fg, font=("Segoe UI", 10))
+        style.configure("TButton", background=panel, foreground=fg, borderwidth=0,
+                        focusthickness=0, padding=(12, 8), font=("Segoe UI", 10))
+        style.map("TButton",
+                  background=[("active", border), ("disabled", panel)],
+                  foreground=[("disabled", "#7a7a7a")])
+        style.configure("Accent.TButton", background=accent, foreground="#ffffff",
+                        font=("Segoe UI", 10, "bold"))
+        style.map("Accent.TButton",
+                  background=[("active", accent_hover), ("disabled", panel)])
+        style.configure("Stop.TButton", background="#c9484b", foreground="#ffffff",
+                        font=("Segoe UI", 10, "bold"))
+        style.map("Stop.TButton",
+                  background=[("active", "#e05a5d"), ("disabled", panel)])
+        style.configure("TEntry", fieldbackground=panel, foreground=fg,
+                        insertcolor=fg, bordercolor=border, lightcolor=border, darkcolor=border)
+        style.configure("TCombobox", fieldbackground=panel, background=panel,
+                        foreground=fg, arrowcolor=fg)
+        style.configure("TLabelframe", background=bg, foreground=fg,
+                        bordercolor=border, relief="solid")
+        style.configure("TLabelframe.Label", background=bg, foreground=accent,
+                        font=("Segoe UI", 10, "bold"))
+        style.configure("Status.TLabel", font=("Segoe UI", 10, "bold"))
+
+    def _build_layout(self):
+        outer = ttk.Frame(self, padding=16)
+        outer.pack(fill="both", expand=True)
+
+        header = ttk.Frame(outer)
+        header.pack(fill="x", pady=(0, 12))
+        ttk.Label(header, text="LogBot",
+                  font=("Segoe UI", 20, "bold")).pack(side="left")
+        ttk.Label(header, text="human-supervised desktop automation",
+                  font=("Segoe UI", 10, "italic"),
+                  foreground="#9a9a9a").pack(side="left", padx=(10, 0))
+
+        self._status_var = tk.StringVar(value="Idle")
+        self._status_label = ttk.Label(header, textvariable=self._status_var,
+                                       style="Status.TLabel", foreground="#9a9a9a")
+        self._status_label.pack(side="right")
+
+        controls = ttk.LabelFrame(outer, text=" Session Control ", padding=14)
+        controls.pack(fill="x", pady=(0, 12))
+
+        row1 = ttk.Frame(controls)
+        row1.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(row1, text="Duration (hours):").pack(side="left")
+        self._duration_var = tk.StringVar(value="1")
+        ttk.Entry(row1, textvariable=self._duration_var, width=8).pack(side="left", padx=(8, 20))
+
+        ttk.Label(row1, text="Mode:").pack(side="left")
+        self._mode_var = tk.StringVar(value="sessions")
+        mode_combo = ttk.Combobox(row1, textvariable=self._mode_var,
+                                  values=("sessions", "wander"), state="readonly", width=14)
+        mode_combo.pack(side="left", padx=(8, 20))
+
+        ttk.Label(row1, text="Idle threshold (s):").pack(side="left")
+        self._idle_var = tk.StringVar(value=str(CFG.idle_threshold))
+        ttk.Entry(row1, textvariable=self._idle_var, width=6).pack(side="left", padx=(8, 0))
+
+        row2 = ttk.Frame(controls)
+        row2.pack(fill="x")
+
+        self._start_btn = ttk.Button(row2, text="Start", style="Accent.TButton",
+                                     command=self._on_start)
+        self._start_btn.pack(side="left")
+        self._stop_btn = ttk.Button(row2, text="Stop", style="Stop.TButton",
+                                    command=self._on_stop, state="disabled")
+        self._stop_btn.pack(side="left", padx=(8, 0))
+        ttk.Button(row2, text="Open docs folder",
+                   command=self._open_docs).pack(side="left", padx=(16, 0))
+        ttk.Button(row2, text="Open log file",
+                   command=self._open_log).pack(side="left", padx=(8, 0))
+        ttk.Button(row2, text="Refresh docs",
+                   command=self._refresh_docs).pack(side="left", padx=(8, 0))
+        ttk.Button(row2, text="Clear log",
+                   command=self._clear_log).pack(side="left", padx=(8, 0))
+
+        metrics = ttk.LabelFrame(outer, text=" Live Metrics ", padding=14)
+        metrics.pack(fill="x", pady=(0, 12))
+
+        grid = ttk.Frame(metrics)
+        grid.pack(fill="x")
+
+        self._cpu_var = tk.StringVar(value="CPU: —")
+        self._mem_var = tk.StringVar(value="RAM: —")
+        self._uptime_var = tk.StringVar(value="Elapsed: 00:00:00")
+        self._mode_metric_var = tk.StringVar(value="Mode: —")
+        self._docs_var = tk.StringVar(value=f"Docs: {CFG.docs_dir}")
+
+        for i, var in enumerate([self._cpu_var, self._mem_var,
+                                 self._uptime_var, self._mode_metric_var]):
+            ttk.Label(grid, textvariable=var, font=("Consolas", 10)).grid(
+                row=0, column=i, sticky="w", padx=(0, 28)
+            )
+        ttk.Label(grid, textvariable=self._docs_var,
+                  font=("Consolas", 9), foreground="#9a9a9a").grid(
+            row=1, column=0, columnspan=4, sticky="w", pady=(6, 0)
+        )
+
+        log_frame = ttk.LabelFrame(outer, text=" Live Log ", padding=8)
+        log_frame.pack(fill="both", expand=True)
+
+        self._log_text = scrolledtext.ScrolledText(
+            log_frame,
+            wrap="word",
+            bg="#15161a",
+            fg="#d7d7d7",
+            insertbackground="#d7d7d7",
+            font=("Consolas", 9),
+            relief="flat",
+            borderwidth=0,
+        )
+        self._log_text.pack(fill="both", expand=True)
+        self._log_text.configure(state="disabled")
+
+        self._log_text.tag_configure("INFO", foreground="#d7d7d7")
+        self._log_text.tag_configure("WARNING", foreground="#e6b455")
+        self._log_text.tag_configure("ERROR", foreground="#e05a5d")
+        self._log_text.tag_configure("CRITICAL", foreground="#ff7a7a")
+
+        footer = ttk.Frame(outer)
+        footer.pack(fill="x", pady=(10, 0))
+        ttk.Label(footer,
+                  text="Fail-safe: slam mouse into a corner to abort.  "
+                       "Manual override: any keyboard/mouse input pauses the bot for the idle threshold.",
+                  font=("Segoe UI", 9), foreground="#9a9a9a").pack(side="left")
+
+    def _wire_events(self):
+        self.bind("<Control-s>", lambda _e: self._on_start())
+        self.bind("<Control-S>", lambda _e: self._on_start())
+        self.bind("<Escape>", lambda _e: self._on_stop())
+        self._start_time: Optional[float] = None
+
+    def _on_start(self):
+        if self._controller.is_running():
+            messagebox.showinfo("LogBot", "A session is already running.")
+            return
+        try:
+            duration_hours = float(self._duration_var.get())
+            if duration_hours <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("LogBot", "Duration must be a positive number.")
+            return
+        try:
+            idle = float(self._idle_var.get())
+            if idle <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("LogBot", "Idle threshold must be a positive number.")
+            return
+
+        CFG.idle_threshold = idle
+        mode = self._mode_var.get()
+        self._start_time = time.time()
+        self._mode_metric_var.set(f"Mode: {mode}")
+        self._set_running(True)
+        log.info(f"UI start requested: duration={duration_hours}h mode={mode} idle={idle}s")
+        self._controller.start(duration_hours, mode)
+
+    def _on_stop(self):
+        if not self._controller.is_running():
+            return
+        log.info("UI stop requested")
+        self._controller.stop()
+
+    def _open_docs(self):
+        CFG.docs_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.startfile(str(CFG.docs_dir))
+        except Exception as e:
+            messagebox.showerror("LogBot", f"Could not open docs folder:\n{e}")
+
+    def _open_log(self):
+        if CFG.log_file.exists():
+            try:
+                os.startfile(str(CFG.log_file))
+                return
+            except Exception as e:
+                messagebox.showerror("LogBot", f"Could not open log:\n{e}")
+        else:
+            messagebox.showinfo("LogBot", "Log file not created yet.")
+
+    def _refresh_docs(self):
+        try:
+            lib = DocLibrary(CFG.docs_dir, CFG.docs_glob)
+            lib.refresh()
+            messagebox.showinfo("LogBot", "Docs refreshed — see log for the count.")
+        except Exception as e:
+            messagebox.showerror("LogBot", f"Refresh failed:\n{e}")
+
+    def _clear_log(self):
+        self._log_text.configure(state="normal")
+        self._log_text.delete("1.0", "end")
+        self._log_text.configure(state="disabled")
+
+    def _set_running(self, running: bool):
+        self._start_btn.configure(state="disabled" if running else "normal")
+        self._stop_btn.configure(state="normal" if running else "disabled")
+
+    def _drain_log_queue(self):
+        drained = 0
+        while True:
+            try:
+                msg = self._log_queue.get_nowait()
+            except queue.Empty:
+                break
+            drained += 1
+            self._append_log(msg)
+            if drained >= 200:
+                break
+        self.after(100, self._drain_log_queue)
+
+    def _append_log(self, msg: str):
+        level = "INFO"
+        if "[WARNING]" in msg:
+            level = "WARNING"
+        elif "[ERROR]" in msg:
+            level = "ERROR"
+        elif "[CRITICAL]" in msg:
+            level = "CRITICAL"
+
+        self._log_text.configure(state="normal")
+        self._log_text.insert("end", msg + "\n", level)
+        self._log_text.see("end")
+
+        line_count = int(self._log_text.index("end-1c").split(".")[0])
+        if line_count > 5000:
+            self._log_text.delete("1.0", f"{line_count - 4000}.0")
+
+        self._log_text.configure(state="disabled")
+
+    def _update_status(self):
+        try:
+            cpu = psutil.cpu_percent(interval=None)
+            vm = psutil.virtual_memory()
+            self._cpu_var.set(f"CPU: {cpu:5.1f}%")
+            self._mem_var.set(f"RAM: {vm.percent:5.1f}%")
+        except Exception:
+            self._cpu_var.set("CPU: —")
+            self._mem_var.set("RAM: —")
+
+        if self._start_time is not None and self._controller.is_running():
+            elapsed = int(time.time() - self._start_time)
+            self._uptime_var.set(
+                f"Elapsed: {elapsed // 3600:02d}:{(elapsed % 3600) // 60:02d}:{elapsed % 60:02d}"
+            )
+        elif not self._controller.is_running():
+            self._uptime_var.set("Elapsed: 00:00:00")
+
+        state = self._controller.state()
+        colors = {
+            "idle": "#9a9a9a",
+            "starting": "#e6b455",
+            "running": "#6fc07a",
+            "stopping": "#e6b455",
+        }
+        self._status_var.set(state.capitalize())
+        self._status_label.configure(foreground=colors.get(state, "#9a9a9a"))
+
+        if not self._controller.is_running() and self._stop_btn["state"] == "normal":
+            self._set_running(False)
+            self._start_time = None
+
+        self.after(400, self._update_status)
+
+    def _on_close(self):
+        if self._controller.is_running():
+            if not messagebox.askyesno("LogBot", "A session is running. Stop it and exit?"):
+                return
+            self._controller.stop()
+            deadline = time.time() + 5.0
+            while self._controller.is_running() and time.time() < deadline:
+                time.sleep(0.05)
+        try:
+            log.removeHandler(self._ui_log_handler)
+        except Exception:
+            pass
+        self.destroy()
 
 
 def main() -> None:
     log.info("=" * 60)
-    log.info("logbot starting")
-    log.info(f"base dir: {CFG.base_dir}")
-    log.info(f"docs dir: {CFG.docs_dir}")
-    log.info(f"log file: {CFG.log_file}")
-
-    docs = DocLibrary(CFG.docs_dir, CFG.docs_glob)
-    docs.refresh()
-
-    monitor = UserActivityMonitor()
-    wm = WindowManager(monitor)
-    actions = Actions(monitor, wm)
-    freeze_guard = FreezeGuard(monitor, actions)
-    engine = WorkflowEngine(monitor, wm, actions, freeze_guard)
-    resources = ResourceManager(monitor, wm)
-    workflows = Workflows(monitor, wm, actions, engine, docs)
-    runner = SessionRunner(monitor, wm, actions, engine, docs)
-
-    monitor.start()
-    freeze_guard.start()
-    resources.start()
-
-    try:
-        duration_hours = float(input("Enter duration in hours: "))
-        duration_seconds = duration_hours * 3600
-        end_time = time.time() + duration_seconds
-
-        time.sleep(CFG.startup_grace)
-        monitor.arm()
-
-        if not wait_for_idle_start(monitor, end_time):
-            log.info("aborted before start")
-            return
-
-        runner.run(duration_seconds)
-
-    except KeyboardInterrupt:
-        log.info("interrupted by user")
-    except SafetyViolation as e:
-        log.error(f"safety violation: {e}")
-    except Exception as e:
-        log.exception(f"fatal: {e}")
-    finally:
-        engine.stop()
-        resources.stop()
-        freeze_guard.stop()
-        monitor.stop()
-        log.info("logbot stopped")
+    log.info("logbot (UI) starting")
+    app = LogbotApp()
+    app.mainloop()
 
 
 if __name__ == "__main__":
