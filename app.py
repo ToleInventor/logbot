@@ -159,10 +159,11 @@ class Logger:
             )
             fh = logging.FileHandler(CFG.log_file, encoding="utf-8")
             fh.setFormatter(fmt)
-            ch = logging.StreamHandler(sys.stdout)
-            ch.setFormatter(fmt)
             lg.addHandler(fh)
-            lg.addHandler(ch)
+            if sys.stdout is not None:
+                ch = logging.StreamHandler(sys.stdout)
+                ch.setFormatter(fmt)
+                lg.addHandler(ch)
             lg.propagate = False
             cls._logger = lg
             return lg
@@ -399,13 +400,6 @@ class WindowManager:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
 
-    def kill_window(self, window) -> None:
-        try:
-            window.close()
-            log.info("sent close to window")
-        except Exception as e:
-            log.debug(f"window close failed: {e}")
-
     def launch(self, exe: str, args: Optional[list] = None) -> subprocess.Popen:
         SafetyGuard.assert_safe_exe(exe)
         args = args or []
@@ -474,7 +468,7 @@ class Actions:
         self.monitor = monitor
         self.wm = wm
 
-    def _guarded(self, fn: Callable[[], Any], label: str) -> Any:
+    def _send(self, fn: Callable[[], Any], label: str) -> Any:
         with self.monitor.input_shield():
             try:
                 return fn()
@@ -520,84 +514,119 @@ class Actions:
             t = i / steps
             x = (1 - t) ** 2 * start_x + 2 * (1 - t) * t * ctrl_x + t ** 2 * target_x
             y = (1 - t) ** 2 * start_y + 2 * (1 - t) * t * ctrl_y + t ** 2 * target_y
-            with self.monitor.input_shield():
-                pyautogui.moveTo(int(x), int(y))
+            self._send(lambda px=int(x), py=int(y): pyautogui.moveTo(px, py), "moveTo")
             time.sleep(duration / steps)
         return True
 
     def click_at(self, x: int, y: int) -> None:
-        self._guarded(lambda: pyautogui.click(x, y), f"click_at({x},{y})")
+        self._send(lambda: pyautogui.click(x, y), f"click_at({x},{y})")
 
     def click_control(self, control) -> None:
         def _do():
             control.wait("visible enabled ready", timeout=CFG.control_timeout)
             control.click_input()
-        self._guarded(_do, "click_control")
+        self._send(_do, "click_control")
 
-    def type_text(self, text: str) -> None:
-        def _do():
-            for ch in text:
-                pyautogui.write(ch, interval=0)
-                time.sleep(self._type_delay())
-                if ch == " ":
-                    time.sleep(random.uniform(
-                        CFG.typing_word_pause_min, CFG.typing_word_pause_max
-                    ))
-                if ch in ".,;:!?":
-                    time.sleep(random.uniform(0.15, 0.45))
-                self._maybe_hesitate()
-        self._guarded(_do, "type_text")
+    def type_text(self, text: str, end_time: Optional[float] = None) -> None:
+        for ch in text:
+            if end_time is not None and time.time() >= end_time:
+                return
+            if self.monitor.user_is_active():
+                return
+            self._send(lambda c=ch: pyautogui.write(c, interval=0), f"write('{ch}')")
+            time.sleep(self._type_delay())
+            if ch == " ":
+                pause = random.uniform(CFG.typing_word_pause_min, CFG.typing_word_pause_max)
+                if end_time is None:
+                    time.sleep(pause)
+                else:
+                    sleep_responsive(pause, end_time, self.monitor)
+            if ch in ".,;:!?":
+                pause = random.uniform(0.15, 0.45)
+                if end_time is None:
+                    time.sleep(pause)
+                else:
+                    sleep_responsive(pause, end_time, self.monitor)
+            self._maybe_hesitate(end_time)
 
     def type_into_control(self, control, text: str, end_time: Optional[float] = None) -> None:
-        def _do():
-            control.wait("visible enabled ready", timeout=CFG.control_timeout)
-            control.set_focus()
-            buf = []
-            for ch in text:
-                if end_time is not None and time.time() >= end_time:
-                    break
-                if self.monitor.user_is_active():
-                    break
-                if ch == "\n":
-                    if buf:
-                        control.type_keys(
-                            "".join(buf),
-                            with_spaces=True, with_newlines=False,
-                        )
-                        buf = []
-                    control.type_keys("{ENTER}", with_newlines=False)
-                    time.sleep(random.uniform(
-                        CFG.typing_line_pause_min, CFG.typing_line_pause_max
-                    ))
-                    continue
-                buf.append(ch)
-                if ch == " ":
-                    control.type_keys(" ", with_spaces=True, with_newlines=False)
-                    buf = []
-                    time.sleep(random.uniform(
-                        CFG.typing_word_pause_min, CFG.typing_word_pause_max
-                    ))
-                    self._maybe_micro_pause(end_time)
-                elif ch in ".,;:!?":
-                    control.type_keys(ch, with_spaces=True, with_newlines=False)
-                    buf = []
-                    time.sleep(random.uniform(0.2, 0.55))
-                else:
-                    control.type_keys(ch, with_spaces=True, with_newlines=False)
-                    time.sleep(self._type_delay())
-                    self._maybe_hesitate(end_time)
+        control.wait("visible enabled ready", timeout=CFG.control_timeout)
+        control.set_focus()
+        buf = []
+
+        def _flush():
             if buf:
-                control.type_keys("".join(buf), with_spaces=True, with_newlines=False)
-        self._guarded(_do, "type_into_control")
+                self._send(
+                    lambda s="".join(buf): control.type_keys(s, with_spaces=True, with_newlines=False),
+                    "type_keys flush",
+                )
+                buf.clear()
+
+        for ch in text:
+            if end_time is not None and time.time() >= end_time:
+                _flush()
+                return
+            if self.monitor.user_is_active():
+                _flush()
+                return
+
+            if ch == "\n":
+                _flush()
+                self._send(
+                    lambda: control.type_keys("{ENTER}", with_newlines=False),
+                    "type_keys ENTER",
+                )
+                pause = random.uniform(CFG.typing_line_pause_min, CFG.typing_line_pause_max)
+                if end_time is None:
+                    time.sleep(pause)
+                else:
+                    sleep_responsive(pause, end_time, self.monitor)
+                continue
+
+            buf.append(ch)
+
+            if ch == " ":
+                _flush()
+                self._send(
+                    lambda: control.type_keys(" ", with_spaces=True, with_newlines=False),
+                    "type_keys space",
+                )
+                pause = random.uniform(CFG.typing_word_pause_min, CFG.typing_word_pause_max)
+                if end_time is None:
+                    time.sleep(pause)
+                else:
+                    sleep_responsive(pause, end_time, self.monitor)
+                self._maybe_micro_pause(end_time)
+            elif ch in ".,;:!?":
+                _flush()
+                self._send(
+                    lambda c=ch: control.type_keys(c, with_spaces=True, with_newlines=False),
+                    f"type_keys '{ch}'",
+                )
+                pause = random.uniform(0.2, 0.55)
+                if end_time is None:
+                    time.sleep(pause)
+                else:
+                    sleep_responsive(pause, end_time, self.monitor)
+            else:
+                _flush()
+                self._send(
+                    lambda c=ch: control.type_keys(c, with_spaces=True, with_newlines=False),
+                    f"type_keys '{ch}'",
+                )
+                time.sleep(self._type_delay())
+                self._maybe_hesitate(end_time)
+
+        _flush()
 
     def hotkey(self, *keys: str) -> None:
-        self._guarded(lambda: pyautogui.hotkey(*keys), f"hotkey{keys}")
+        self._send(lambda: pyautogui.hotkey(*keys), f"hotkey{keys}")
 
     def send_win_keys(self, seq: str) -> None:
-        self._guarded(lambda: uia_send_keys(seq), f"send_keys({seq})")
+        self._send(lambda: uia_send_keys(seq), f"send_keys({seq})")
 
     def scroll(self, clicks: int) -> None:
-        self._guarded(lambda: pyautogui.scroll(clicks), "scroll")
+        self._send(lambda: pyautogui.scroll(clicks), "scroll")
 
     def jitter(self, count: Optional[int] = None,
                end_time: Optional[float] = None) -> bool:
@@ -610,8 +639,10 @@ class Actions:
                 return False
             dx = random.randint(-4, 4)
             dy = random.randint(-4, 4)
-            with self.monitor.input_shield():
-                pyautogui.moveRel(dx, dy, duration=0.02)
+            self._send(
+                lambda a=dx, b=dy: pyautogui.moveRel(a, b, duration=0.02),
+                "moveRel",
+            )
         return True
 
     def hover_around(self, end_time: float) -> bool:
@@ -973,9 +1004,9 @@ class SessionRunner:
             log.info("starting hover break")
             self.actions.hover_around(end_time)
 
-    def run(self, duration_seconds: float) -> None:
+    def run(self, duration_seconds: float, mode: str = "sessions") -> None:
         end_time = time.time() + duration_seconds
-        log.info("session runner started")
+        log.info(f"session runner started in mode '{mode}'")
 
         while time.time() < end_time and not self.engine.stopped():
             if not self.monitor.wait_until_user_idle(end_time):
@@ -988,16 +1019,27 @@ class SessionRunner:
             if time.time() >= end_time or self.engine.stopped():
                 break
 
-            apps_this_session = random.randint(
-                CFG.session_min_apps, CFG.session_max_apps
-            )
-            choices = random.sample(
-                self._available_recipes(),
-                k=min(apps_this_session, len(self._recipes)),
-            )
-            log.info(f"session plan: {choices}")
+            if mode == "notepad":
+                plan = ["notepad"]
+            elif mode == "explorer":
+                plan = ["explorer"]
+            elif mode == "sessions":
+                n = random.randint(CFG.session_min_apps, CFG.session_max_apps)
+                plan = random.sample(
+                    self._available_recipes(),
+                    k=min(n, len(self._recipes)),
+                )
+            else:
+                log.warning(f"unknown mode '{mode}' - defaulting to 'sessions'")
+                n = random.randint(CFG.session_min_apps, CFG.session_max_apps)
+                plan = random.sample(
+                    self._available_recipes(),
+                    k=min(n, len(self._recipes)),
+                )
 
-            for app_name in choices:
+            log.info(f"session plan: {plan}")
+
+            for app_name in plan:
                 if time.time() >= end_time or self.engine.stopped():
                     break
                 if not self.monitor.wait_until_user_idle(end_time):
@@ -1080,7 +1122,7 @@ class SessionRunner:
                     else:
                         ok = self.engine.run_step(
                             f"notepad type block {block+1}",
-                            lambda t=text: self.actions.type_text(t),
+                            lambda t=text: self.actions.type_text(t, app_deadline),
                         )
                         if not ok and not self.wm.is_alive(proc.pid):
                             self.wm.forget(proc.pid)
@@ -1173,7 +1215,7 @@ class SessionRunner:
                         name = f"folder_{random.randint(1000, 9999)}"
                         self.actions.hotkey("ctrl", "shift", "n")
                         sleep_responsive(random.uniform(0.4, 1.0), app_deadline, self.monitor)
-                        self.actions.type_text(name)
+                        self.actions.type_text(name, app_deadline)
                         sleep_responsive(random.uniform(0.3, 0.8), app_deadline, self.monitor)
                         self.actions.accept_dialog()
                         sleep_responsive(random.uniform(0.5, 1.2), app_deadline, self.monitor)
@@ -1233,8 +1275,7 @@ class SessionRunner:
 
 
 class BotController:
-    def __init__(self, log_queue: "queue.Queue[str]"):
-        self.log_queue = log_queue
+    def __init__(self):
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._monitor: Optional[UserActivityMonitor] = None
@@ -1295,7 +1336,7 @@ class BotController:
             time.sleep(CFG.startup_grace)
             self._monitor.arm()
 
-            log.info(f"waiting for {CFG.idle_threshold:.0f}s idle before starting")
+            log.info(f"waiting for {CFG.idle_threshold:.1f}s idle before starting")
             while self._monitor.user_is_active():
                 if time.time() >= end_time or self._stop_event.is_set():
                     log.info("aborted before start")
@@ -1309,7 +1350,7 @@ class BotController:
             if mode == "wander":
                 workflows.wander(duration_seconds)
             else:
-                runner.run(duration_seconds)
+                runner.run(duration_seconds, mode=mode)
 
         except SafetyViolation as e:
             log.error(f"safety violation: {e}")
@@ -1335,7 +1376,7 @@ class LogbotApp(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title("LogBot — Human-Supervised Desktop Automation")
+        self.title("LogBot - Human-Supervised Desktop Automation")
         self.geometry("980x680")
         self.minsize(820, 560)
         self.configure(bg="#1e1f22")
@@ -1348,14 +1389,15 @@ class LogbotApp(tk.Tk):
         ))
         log.addHandler(self._ui_log_handler)
 
-        self._controller = BotController(self._log_queue)
+        self._controller = BotController()
+        self._start_time: Optional[float] = None
 
         self._build_style()
         self._build_layout()
         self._wire_events()
 
         self.after(100, self._drain_log_queue)
-        self.after(250, self._update_status)
+        self.after(400, self._update_status)
 
         log.info(f"base dir: {CFG.base_dir}")
         log.info(f"docs dir: {CFG.docs_dir}")
@@ -1432,8 +1474,13 @@ class LogbotApp(tk.Tk):
 
         ttk.Label(row1, text="Mode:").pack(side="left")
         self._mode_var = tk.StringVar(value="sessions")
-        mode_combo = ttk.Combobox(row1, textvariable=self._mode_var,
-                                  values=("sessions", "wander"), state="readonly", width=14)
+        mode_combo = ttk.Combobox(
+            row1,
+            textvariable=self._mode_var,
+            values=("notepad", "explorer", "sessions", "wander"),
+            state="readonly",
+            width=14,
+        )
         mode_combo.pack(side="left", padx=(8, 20))
 
         ttk.Label(row1, text="Idle threshold (s):").pack(side="left")
@@ -1464,10 +1511,10 @@ class LogbotApp(tk.Tk):
         grid = ttk.Frame(metrics)
         grid.pack(fill="x")
 
-        self._cpu_var = tk.StringVar(value="CPU: —")
-        self._mem_var = tk.StringVar(value="RAM: —")
+        self._cpu_var = tk.StringVar(value="CPU: -")
+        self._mem_var = tk.StringVar(value="RAM: -")
         self._uptime_var = tk.StringVar(value="Elapsed: 00:00:00")
-        self._mode_metric_var = tk.StringVar(value="Mode: —")
+        self._mode_metric_var = tk.StringVar(value="Mode: -")
         self._docs_var = tk.StringVar(value=f"Docs: {CFG.docs_dir}")
 
         for i, var in enumerate([self._cpu_var, self._mem_var,
@@ -1512,7 +1559,6 @@ class LogbotApp(tk.Tk):
         self.bind("<Control-s>", lambda _e: self._on_start())
         self.bind("<Control-S>", lambda _e: self._on_start())
         self.bind("<Escape>", lambda _e: self._on_stop())
-        self._start_time: Optional[float] = None
 
     def _on_start(self):
         if self._controller.is_running():
@@ -1568,7 +1614,7 @@ class LogbotApp(tk.Tk):
         try:
             lib = DocLibrary(CFG.docs_dir, CFG.docs_glob)
             lib.refresh()
-            messagebox.showinfo("LogBot", "Docs refreshed — see log for the count.")
+            messagebox.showinfo("LogBot", "Docs refreshed - see log for the count.")
         except Exception as e:
             messagebox.showerror("LogBot", f"Refresh failed:\n{e}")
 
@@ -1620,8 +1666,8 @@ class LogbotApp(tk.Tk):
             self._cpu_var.set(f"CPU: {cpu:5.1f}%")
             self._mem_var.set(f"RAM: {vm.percent:5.1f}%")
         except Exception:
-            self._cpu_var.set("CPU: —")
-            self._mem_var.set("RAM: —")
+            self._cpu_var.set("CPU: -")
+            self._mem_var.set("RAM: -")
 
         if self._start_time is not None and self._controller.is_running():
             elapsed = int(time.time() - self._start_time)
@@ -1641,7 +1687,7 @@ class LogbotApp(tk.Tk):
         self._status_var.set(state.capitalize())
         self._status_label.configure(foreground=colors.get(state, "#9a9a9a"))
 
-        if not self._controller.is_running() and self._stop_btn["state"] == "normal":
+        if not self._controller.is_running() and str(self._stop_btn["state"]) == "normal":
             self._set_running(False)
             self._start_time = None
 
