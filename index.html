@@ -1,0 +1,1291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Celestial Atlas · Interactive Star Map</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,600;14..32,700&family=Space+Grotesk:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        /* ----- CSS Reset & Base Styles ----- */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-deep: #050510;
+            --bg-panel: #0c0c1a;
+            --bg-panel-light: #12122a;
+            --border-glow: #2a2a5a;
+            --text-primary: #e8e8ff;
+            --text-secondary: #a0a0d0;
+            --accent-star: #ffd966;
+            --accent-cyan: #6ee7ff;
+            --accent-purple: #b48cff;
+            --accent-pink: #ff8ac4;
+            --shadow-soft: 0 8px 32px rgba(0, 0, 0, 0.7);
+            --radius-card: 24px;
+            --radius-sm: 12px;
+        }
+
+        body {
+            background-color: var(--bg-deep);
+            background-image: 
+                radial-gradient(circle at 15% 20%, rgba(80, 60, 180, 0.15) 0%, transparent 35%),
+                radial-gradient(circle at 85% 70%, rgba(0, 180, 200, 0.1) 0%, transparent 40%),
+                radial-gradient(circle at 45% 85%, rgba(180, 60, 140, 0.08) 0%, transparent 45%);
+            color: var(--text-primary);
+            font-family: 'Inter', sans-serif;
+            line-height: 1.6;
+            min-height: 100vh;
+            overflow-x: hidden;
+            padding: 0 24px 60px;
+        }
+
+        /* Starfield background (pure CSS) */
+        .starfield {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -2;
+            pointer-events: none;
+        }
+
+        .starfield::before,
+        .starfield::after {
+            content: '';
+            position: absolute;
+            width: 200%;
+            height: 200%;
+            top: -50%;
+            left: -50%;
+            background-image: 
+                radial-gradient(2px 2px at 20px 30px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(2px 2px at 40px 70px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(2px 2px at 50px 160px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(2px 2px at 90px 40px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(2px 2px at 130px 80px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(2px 2px at 160px 30px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(3px 3px at 200px 120px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(2px 2px at 250px 50px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(1px 1px at 300px 190px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(2px 2px at 350px 100px, #ffffff, rgba(0,0,0,0));
+            background-size: 400px 400px;
+            background-repeat: repeat;
+            opacity: 0.5;
+            animation: drift 120s linear infinite;
+        }
+
+        .starfield::after {
+            background-image: 
+                radial-gradient(1px 1px at 50px 50px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(1px 1px at 150px 150px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(2px 2px at 250px 250px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(1px 1px at 350px 50px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(1px 1px at 450px 150px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(2px 2px at 550px 350px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(1px 1px at 650px 250px, #ffffff, rgba(0,0,0,0)),
+                radial-gradient(1px 1px at 750px 150px, #ffffff, rgba(0,0,0,0));
+            background-size: 600px 600px;
+            opacity: 0.3;
+            animation: drift 200s linear infinite reverse;
+        }
+
+        @keyframes drift {
+            0% { transform: translate(0, 0) rotate(0deg); }
+            100% { transform: translate(-50px, -50px) rotate(2deg); }
+        }
+
+        /* ----- Layout Containers ----- */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ----- Header ----- */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 28px 0 20px;
+            border-bottom: 1px solid rgba(110, 231, 255, 0.15);
+            margin-bottom: 36px;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .logo-icon {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            box-shadow: 0 0 25px rgba(110, 231, 255, 0.5);
+            animation: pulse-glow 3s ease-in-out infinite;
+        }
+
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 25px rgba(110, 231, 255, 0.4); }
+            50% { box-shadow: 0 0 40px rgba(110, 231, 255, 0.8); }
+        }
+
+        .logo-text h1 {
+            font-family: 'Space Grotesk', sans-serif;
+            font-weight: 600;
+            font-size: 1.8rem;
+            letter-spacing: -0.5px;
+            background: linear-gradient(135deg, #ffffff, #b0b0ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .logo-text p {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            font-weight: 300;
+        }
+
+        .nav-stats {
+            display: flex;
+            gap: 32px;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 1.6rem;
+            font-weight: 600;
+            color: var(--accent-cyan);
+            line-height: 1.2;
+        }
+
+        .stat-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--text-secondary);
+        }
+
+        /* ----- Hero / Intro ----- */
+        .hero {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+            align-items: center;
+            margin-bottom: 60px;
+        }
+
+        .hero-content h2 {
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 2.8rem;
+            font-weight: 500;
+            line-height: 1.2;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, #ffffff 0%, #a0a0ff 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero-content p {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            max-width: 500px;
+            margin-bottom: 30px;
+            font-weight: 300;
+        }
+
+        .hero-actions {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 14px 32px;
+            border-radius: 60px;
+            font-family: 'Inter', sans-serif;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            text-decoration: none;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+            color: #0a0a18;
+            box-shadow: 0 8px 24px rgba(110, 231, 255, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 32px rgba(110, 231, 255, 0.5);
+        }
+
+        .btn-outline {
+            background: transparent;
+            color: var(--text-primary);
+            border: 1px solid rgba(110, 231, 255, 0.4);
+        }
+
+        .btn-outline:hover {
+            border-color: var(--accent-cyan);
+            background: rgba(110, 231, 255, 0.08);
+            transform: translateY(-2px);
+        }
+
+        .hero-visual {
+            position: relative;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 340px;
+        }
+
+        .orbital-ring {
+            position: absolute;
+            border: 1px solid rgba(110, 231, 255, 0.2);
+            border-radius: 50%;
+            animation: spin-slow 40s linear infinite;
+        }
+
+        .orbital-ring:nth-child(1) {
+            width: 300px;
+            height: 300px;
+            border-color: rgba(180, 140, 255, 0.2);
+            animation-duration: 50s;
+        }
+
+        .orbital-ring:nth-child(2) {
+            width: 220px;
+            height: 220px;
+            border-color: rgba(110, 231, 255, 0.25);
+            animation-duration: 35s;
+            animation-direction: reverse;
+        }
+
+        .orbital-ring:nth-child(3) {
+            width: 140px;
+            height: 140px;
+            border-color: rgba(255, 138, 196, 0.3);
+            animation-duration: 25s;
+        }
+
+        @keyframes spin-slow {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        .orbital-core {
+            width: 80px;
+            height: 80px;
+            background: radial-gradient(circle, #ffffff, var(--accent-cyan));
+            border-radius: 50%;
+            box-shadow: 0 0 60px var(--accent-cyan), 0 0 120px rgba(110, 231, 255, 0.5);
+            z-index: 2;
+        }
+
+        .orbital-dot {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            background: var(--accent-pink);
+            border-radius: 50%;
+            box-shadow: 0 0 20px var(--accent-pink);
+            top: -5px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .orbital-dot-2 {
+            background: var(--accent-star);
+            box-shadow: 0 0 20px var(--accent-star);
+            top: auto;
+            bottom: -5px;
+        }
+
+        /* ----- Featured Constellations Grid ----- */
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 28px;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .section-header h3 {
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 1.8rem;
+            font-weight: 500;
+            color: #ffffff;
+            letter-spacing: -0.3px;
+        }
+
+        .section-header a {
+            color: var(--accent-cyan);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: color 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .section-header a:hover {
+            color: var(--accent-star);
+        }
+
+        .constellation-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 24px;
+            margin-bottom: 60px;
+        }
+
+        .constellation-card {
+            background: var(--bg-panel);
+            border: 1px solid rgba(110, 231, 255, 0.1);
+            border-radius: var(--radius-card);
+            padding: 24px;
+            transition: all 0.35s cubic-bezier(0.2, 0.9, 0.4, 1);
+            position: relative;
+            overflow: hidden;
+            cursor: pointer;
+        }
+
+        .constellation-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--accent-cyan), var(--accent-purple), transparent);
+            opacity: 0;
+            transition: opacity 0.35s;
+        }
+
+        .constellation-card:hover {
+            transform: translateY(-6px) scale(1.01);
+            border-color: rgba(110, 231, 255, 0.35);
+            box-shadow: var(--shadow-soft), 0 0 40px rgba(110, 231, 255, 0.1);
+        }
+
+        .constellation-card:hover::before {
+            opacity: 1;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 18px;
+        }
+
+        .card-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 16px;
+            background: rgba(110, 231, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            color: var(--accent-cyan);
+        }
+
+        .card-badge {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            padding: 4px 12px;
+            border-radius: 40px;
+            background: rgba(180, 140, 255, 0.15);
+            color: var(--accent-purple);
+            font-weight: 600;
+        }
+
+        .constellation-card h4 {
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 1.3rem;
+            font-weight: 500;
+            margin-bottom: 8px;
+            color: #ffffff;
+        }
+
+        .constellation-card p {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-bottom: 20px;
+            line-height: 1.5;
+        }
+
+        .card-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            padding-top: 16px;
+        }
+
+        .star-count {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .star-count span {
+            color: var(--accent-star);
+            font-weight: 600;
+        }
+
+        .magnitude {
+            font-family: 'Space Grotesk', sans-serif;
+            color: var(--accent-cyan);
+            font-weight: 500;
+        }
+
+        /* ----- Main Interactive Sky Map (Canvas) ----- */
+        .sky-map-section {
+            margin-bottom: 60px;
+            background: var(--bg-panel);
+            border-radius: var(--radius-card);
+            border: 1px solid rgba(110, 231, 255, 0.12);
+            overflow: hidden;
+        }
+
+        .sky-map-header {
+            padding: 24px 28px;
+            border-bottom: 1px solid rgba(110, 231, 255, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .sky-map-header h3 {
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 1.5rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .sky-map-controls {
+            display: flex;
+            gap: 12px;
+        }
+
+        .control-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(110, 231, 255, 0.2);
+            color: var(--text-primary);
+            padding: 8px 16px;
+            border-radius: 40px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: 'Inter', sans-serif;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .control-btn:hover {
+            background: rgba(110, 231, 255, 0.15);
+            border-color: var(--accent-cyan);
+        }
+
+        .control-btn.active {
+            background: rgba(110, 231, 255, 0.2);
+            border-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+        }
+
+        #skyCanvas {
+            display: block;
+            width: 100%;
+            height: 480px;
+            background: radial-gradient(ellipse at center, #0a0a1a 0%, #03030c 100%);
+            cursor: crosshair;
+        }
+
+        .canvas-info {
+            padding: 16px 28px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            border-top: 1px solid rgba(110, 231, 255, 0.08);
+        }
+
+        .coords {
+            font-family: 'Space Grotesk', monospace;
+            color: var(--accent-cyan);
+        }
+
+        /* ----- Deep Sky Objects Table ----- */
+        .deep-sky-section {
+            margin-bottom: 60px;
+        }
+
+        .table-container {
+            background: var(--bg-panel);
+            border-radius: var(--radius-card);
+            border: 1px solid rgba(110, 231, 255, 0.1);
+            overflow: hidden;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 800px;
+        }
+
+        th {
+            text-align: left;
+            padding: 20px 24px;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-secondary);
+            font-weight: 600;
+            border-bottom: 1px solid rgba(110, 231, 255, 0.1);
+            background: rgba(110, 231, 255, 0.03);
+        }
+
+        td {
+            padding: 16px 24px;
+            font-size: 0.9rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            color: var(--text-primary);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover td {
+            background: rgba(110, 231, 255, 0.04);
+        }
+
+        .obj-name {
+            font-weight: 600;
+            color: #ffffff;
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        .obj-type {
+            font-size: 0.75rem;
+            padding: 4px 12px;
+            border-radius: 40px;
+            background: rgba(180, 140, 255, 0.12);
+            color: var(--accent-purple);
+            font-weight: 500;
+            display: inline-block;
+        }
+
+        .type-galaxy { background: rgba(110, 231, 255, 0.12); color: var(--accent-cyan); }
+        .type-nebula { background: rgba(255, 138, 196, 0.12); color: var(--accent-pink); }
+        .type-cluster { background: rgba(255, 217, 102, 0.12); color: var(--accent-star); }
+
+        .magnitude-val {
+            font-family: 'Space Grotesk', monospace;
+            color: var(--accent-star);
+        }
+
+        /* ----- Footer ----- */
+        .footer {
+            margin-top: 80px;
+            padding: 40px 0 20px;
+            border-top: 1px solid rgba(110, 231, 255, 0.1);
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 40px;
+        }
+
+        .footer-col h5 {
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 1rem;
+            font-weight: 500;
+            margin-bottom: 20px;
+            color: #ffffff;
+        }
+
+        .footer-col ul {
+            list-style: none;
+        }
+
+        .footer-col ul li {
+            margin-bottom: 12px;
+        }
+
+        .footer-col ul li a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color 0.2s;
+        }
+
+        .footer-col ul li a:hover {
+            color: var(--accent-cyan);
+        }
+
+        .footer-bottom {
+            grid-column: 1 / -1;
+            text-align: center;
+            padding-top: 40px;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+            margin-top: 20px;
+        }
+
+        /* ----- Tooltip for Canvas ----- */
+        .canvas-tooltip {
+            position: absolute;
+            background: rgba(12, 12, 26, 0.95);
+            border: 1px solid var(--accent-cyan);
+            border-radius: 12px;
+            padding: 8px 16px;
+            font-size: 0.8rem;
+            pointer-events: none;
+            backdrop-filter: blur(8px);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+            z-index: 100;
+            transition: opacity 0.15s;
+            color: #fff;
+            white-space: nowrap;
+        }
+
+        /* ----- Responsive ----- */
+        @media (max-width: 900px) {
+            .hero {
+                grid-template-columns: 1fr;
+                text-align: center;
+            }
+            .hero-content p {
+                margin-left: auto;
+                margin-right: auto;
+            }
+            .hero-actions {
+                justify-content: center;
+            }
+            .hero-visual {
+                min-height: 280px;
+            }
+            .orbital-ring:nth-child(1) { width: 240px; height: 240px; }
+            .orbital-ring:nth-child(2) { width: 170px; height: 170px; }
+            .orbital-ring:nth-child(3) { width: 110px; height: 110px; }
+            .orbital-core { width: 60px; height: 60px; }
+        }
+
+        @media (max-width: 600px) {
+            body { padding: 0 16px 40px; }
+            .header { flex-direction: column; align-items: flex-start; }
+            .nav-stats { width: 100%; justify-content: space-around; }
+            .hero-content h2 { font-size: 2rem; }
+            .section-header h3 { font-size: 1.4rem; }
+            #skyCanvas { height: 320px; }
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: var(--bg-deep);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-glow);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--accent-cyan);
+        }
+    </style>
+</head>
+<body>
+    <!-- Pure CSS Starfield Background -->
+    <div class="starfield"></div>
+
+    <div class="container">
+        <!-- ===== HEADER ===== -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">✦</div>
+                <div class="logo-text">
+                    <h1>CELESTIAL ATLAS</h1>
+                    <p>Interactive Star Map</p>
+                </div>
+            </div>
+            <div class="nav-stats">
+                <div class="stat-item">
+                    <div class="stat-value">88</div>
+                    <div class="stat-label">Constellations</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">9,096</div>
+                    <div class="stat-label">Visible Stars</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">110</div>
+                    <div class="stat-label">Messier Objects</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- ===== HERO ===== -->
+        <section class="hero">
+            <div class="hero-content">
+                <h2>Explore the night sky from anywhere on Earth.</h2>
+                <p>Navigate through constellations, deep-sky objects, and stellar phenomena with our interactive celestial atlas. Designed for astronomers, dreamers, and curious minds.</p>
+                <div class="hero-actions">
+                    <button class="btn btn-primary" id="exploreBtn">✦ Start Exploring</button>
+                    <button class="btn btn-outline" id="randomBtn">↻ Random Object</button>
+                </div>
+            </div>
+            <div class="hero-visual">
+                <div class="orbital-ring">
+                    <div class="orbital-dot"></div>
+                </div>
+                <div class="orbital-ring">
+                    <div class="orbital-dot orbital-dot-2"></div>
+                </div>
+                <div class="orbital-ring">
+                    <div class="orbital-dot"></div>
+                </div>
+                <div class="orbital-core"></div>
+            </div>
+        </section>
+
+        <!-- ===== FEATURED CONSTELLATIONS ===== -->
+        <section>
+            <div class="section-header">
+                <h3>✦ Featured Constellations</h3>
+                <a href="#">View all 88 →</a>
+            </div>
+            <div class="constellation-grid" id="constellationGrid">
+                <!-- Cards will be injected via JS (but we also have static fallbacks for beauty) -->
+            </div>
+        </section>
+
+        <!-- ===== INTERACTIVE SKY MAP ===== -->
+        <section class="sky-map-section">
+            <div class="sky-map-header">
+                <h3>🌌 Live Sky Canvas</h3>
+                <div class="sky-map-controls">
+                    <button class="control-btn active" id="toggleLabels">🔤 Labels</button>
+                    <button class="control-btn active" id="toggleGrid">📐 Grid</button>
+                    <button class="control-btn" id="resetView">↺ Reset</button>
+                </div>
+            </div>
+            <canvas id="skyCanvas" width="1200" height="480"></canvas>
+            <div class="canvas-info">
+                <span>🖱️ Hover over a star to see details</span>
+                <span class="coords" id="coordsDisplay">RA: 12h 34m · Dec: +45° 12'</span>
+            </div>
+        </section>
+
+        <!-- ===== DEEP SKY OBJECTS TABLE ===== -->
+        <section class="deep-sky-section">
+            <div class="section-header">
+                <h3>🔭 Deep Sky Objects</h3>
+                <a href="#">Full catalog →</a>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Object</th>
+                            <th>Type</th>
+                            <th>Constellation</th>
+                            <th>Magnitude</th>
+                            <th>Distance (ly)</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody id="deepSkyBody">
+                        <!-- Filled via JS -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ===== FOOTER ===== -->
+        <footer class="footer">
+            <div class="footer-col">
+                <h5>Celestial Atlas</h5>
+                <ul>
+                    <li><a href="#">About</a></li>
+                    <li><a href="#">Documentation</a></li>
+                    <li><a href="#">API Access</a></li>
+                    <li><a href="#">Changelog</a></li>
+                </ul>
+            </div>
+            <div class="footer-col">
+                <h5>Resources</h5>
+                <ul>
+                    <li><a href="#">Star Charts</a></li>
+                    <li><a href="#">Messier Catalog</a></li>
+                    <li><a href="#">NGC Index</a></li>
+                    <li><a href="#">Astro Calendar</a></li>
+                </ul>
+            </div>
+            <div class="footer-col">
+                <h5>Community</h5>
+                <ul>
+                    <li><a href="#">Discord</a></li>
+                    <li><a href="#">GitHub</a></li>
+                    <li><a href="#">Twitter</a></li>
+                    <li><a href="#">Newsletter</a></li>
+                </ul>
+            </div>
+            <div class="footer-col">
+                <h5>Legal</h5>
+                <ul>
+                    <li><a href="#">Privacy</a></li>
+                    <li><a href="#">Terms</a></li>
+                    <li><a href="#">Licenses</a></li>
+                </ul>
+            </div>
+            <div class="footer-bottom">
+                © 2025 Celestial Atlas · Crafted for the love of the cosmos · All data is for educational purposes.
+            </div>
+        </footer>
+    </div>
+
+    <!-- Tooltip element (absolutely positioned) -->
+    <div class="canvas-tooltip" id="tooltip" style="opacity:0;"></div>
+
+    <script>
+        // ============================================================
+        //  DATA
+        // ============================================================
+
+        // Featured Constellations Data
+        const constellations = [
+            { name: "Orion", icon: "🏹", badge: "Winter", desc: "The Hunter. Home to Betelgeuse and the Orion Nebula.", stars: 7, mag: 0.42, lore: "Greek mythology" },
+            { name: "Ursa Major", icon: "🐻", badge: "Circumpolar", desc: "The Great Bear. Contains the Big Dipper asterism.", stars: 7, mag: 1.77, lore: "Native American" },
+            { name: "Cassiopeia", icon: "👑", badge: "Autumn", desc: "The Queen. Distinctive W-shaped asterism.", stars: 5, mag: 2.15, lore: "Greek mythology" },
+            { name: "Scorpius", icon: "🦂", badge: "Summer", desc: "The Scorpion. Home to Antares and many clusters.", stars: 12, mag: 0.96, lore: "Greek / Babylonian" },
+            { name: "Cygnus", icon: "🦢", badge: "Summer", desc: "The Swan. Contains the Northern Cross and Deneb.", stars: 9, mag: 1.25, lore: "Greek mythology" },
+            { name: "Taurus", icon: "🐂", badge: "Winter", desc: "The Bull. Contains the Pleiades and Hyades.", stars: 19, mag: 0.85, lore: "Greek / Babylonian" },
+            { name: "Leo", icon: "🦁", badge: "Spring", desc: "The Lion. Contains the bright star Regulus.", stars: 9, mag: 1.35, lore: "Greek / Egyptian" },
+            { name: "Lyra", icon: "🎵", badge: "Summer", desc: "The Lyre. Contains Vega and the Ring Nebula.", stars: 5, mag: 0.03, lore: "Greek mythology" }
+        ];
+
+        // Deep Sky Objects Data
+        const deepSkyObjects = [
+            { name: "M42", type: "Nebula", typeClass: "type-nebula", const: "Orion", mag: 4.0, dist: "1,344", desc: "Orion Nebula — stellar nursery" },
+            { name: "M31", type: "Galaxy", typeClass: "type-galaxy", const: "Andromeda", mag: 3.4, dist: "2.5M", desc: "Andromeda Galaxy — nearest spiral" },
+            { name: "M45", type: "Cluster", typeClass: "type-cluster", const: "Taurus", mag: 1.6, dist: "444", desc: "Pleiades — Seven Sisters" },
+            { name: "M13", type: "Cluster", typeClass: "type-cluster", const: "Hercules", mag: 5.8, dist: "22,200", desc: "Great Globular Cluster" },
+            { name: "M57", type: "Nebula", typeClass: "type-nebula", const: "Lyra", mag: 8.8, dist: "2,300", desc: "Ring Nebula — planetary nebula" },
+            { name: "M51", type: "Galaxy", typeClass: "type-galaxy", const: "Canes Venatici", mag: 8.4, dist: "23M", desc: "Whirlpool Galaxy — interacting pair" },
+            { name: "M8", type: "Nebula", typeClass: "type-nebula", const: "Sagittarius", mag: 6.0, dist: "4,100", desc: "Lagoon Nebula — emission nebula" },
+            { name: "M44", type: "Cluster", typeClass: "type-cluster", const: "Cancer", mag: 3.7, dist: "577", desc: "Beehive Cluster — open cluster" },
+            { name: "M27", type: "Nebula", typeClass: "type-nebula", const: "Vulpecula", mag: 7.4, dist: "1,360", desc: "Dumbbell Nebula — planetary" },
+            { name: "M81", type: "Galaxy", typeClass: "type-galaxy", const: "Ursa Major", mag: 6.9, dist: "12M", desc: "Bode's Galaxy — grand design spiral" },
+            { name: "M104", type: "Galaxy", typeClass: "type-galaxy", const: "Virgo", mag: 8.0, dist: "29M", desc: "Sombrero Galaxy — edge-on spiral" },
+            { name: "M16", type: "Cluster", typeClass: "type-cluster", const: "Serpens", mag: 6.0, dist: "7,000", desc: "Eagle Nebula — Pillars of Creation" },
+            { name: "M17", type: "Nebula", typeClass: "type-nebula", const: "Sagittarius", mag: 6.0, dist: "5,500", desc: "Omega Nebula — emission nebula" },
+            { name: "M22", type: "Cluster", typeClass: "type-cluster", const: "Sagittarius", mag: 5.1, dist: "10,400", desc: "Sagittarius Cluster — globular" },
+            { name: "M33", type: "Galaxy", typeClass: "type-galaxy", const: "Triangulum", mag: 5.7, dist: "2.7M", desc: "Triangulum Galaxy — local group" },
+            { name: "M20", type: "Nebula", typeClass: "type-nebula", const: "Sagittarius", mag: 6.3, dist: "5,200", desc: "Trifid Nebula — emission/reflection" },
+            { name: "M97", type: "Nebula", typeClass: "type-nebula", const: "Ursa Major", mag: 9.9, dist: "2,600", desc: "Owl Nebula — planetary" },
+            { name: "M101", type: "Galaxy", typeClass: "type-galaxy", const: "Ursa Major", mag: 7.9, dist: "21M", desc: "Pinwheel Galaxy — face-on spiral" },
+            { name: "M15", type: "Cluster", typeClass: "type-cluster", const: "Pegasus", mag: 6.2, dist: "33,600", desc: "Great Pegasus Cluster" },
+            { name: "M64", type: "Galaxy", typeClass: "type-galaxy", const: "Coma Berenices", mag: 8.5, dist: "17M", desc: "Black Eye Galaxy — dark dust lane" }
+        ];
+
+        // ============================================================
+        //  RENDER CONSTELLATION CARDS
+        // ============================================================
+        const constellationGrid = document.getElementById('constellationGrid');
+        constellations.forEach(c => {
+            const card = document.createElement('div');
+            card.className = 'constellation-card';
+            card.innerHTML = `
+                <div class="card-header">
+                    <div class="card-icon">${c.icon}</div>
+                    <div class="card-badge">${c.badge}</div>
+                </div>
+                <h4>${c.name}</h4>
+                <p>${c.desc}</p>
+                <div class="card-meta">
+                    <div class="star-count">⭐ <span>${c.stars}</span> main stars</div>
+                    <div class="magnitude">mag ${c.mag}</div>
+                </div>
+            `;
+            constellationGrid.appendChild(card);
+        });
+
+        // ============================================================
+        //  RENDER DEEP SKY TABLE
+        // ============================================================
+        const deepSkyBody = document.getElementById('deepSkyBody');
+        deepSkyObjects.forEach(obj => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td class="obj-name">${obj.name}</td>
+                <td><span class="obj-type ${obj.typeClass}">${obj.type}</span></td>
+                <td>${obj.const}</td>
+                <td class="magnitude-val">${obj.mag.toFixed(1)}</td>
+                <td>${obj.dist}</td>
+                <td>${obj.desc}</td>
+            `;
+            deepSkyBody.appendChild(row);
+        });
+
+        // ============================================================
+        //  SKY CANVAS — INTERACTIVE STAR MAP
+        // ============================================================
+        const canvas = document.getElementById('skyCanvas');
+        const ctx = canvas.getContext('2d');
+        const tooltip = document.getElementById('tooltip');
+        const coordsDisplay = document.getElementById('coordsDisplay');
+
+        // Generate random star field (deterministic for consistency)
+        const stars = [];
+        const STAR_COUNT = 220;
+        let seed = 42;
+        function random() {
+            seed = (seed * 16807) % 2147483647;
+            return (seed - 1) / 2147483646;
+        }
+
+        // Create star data
+        for (let i = 0; i < STAR_COUNT; i++) {
+            const x = random() * canvas.width;
+            const y = random() * canvas.height;
+            const radius = random() * 1.8 + 0.4;
+            const brightness = random() * 0.7 + 0.3;
+            const name = getStarName(i);
+            stars.push({ x, y, radius, brightness, name });
+        }
+
+        function getStarName(index) {
+            const names = [
+                "Sirius", "Canopus", "Arcturus", "Vega", "Capella", "Rigel", "Procyon",
+                "Betelgeuse", "Achernar", "Hadar", "Altair", "Acrux", "Aldebaran",
+                "Antares", "Spica", "Pollux", "Fomalhaut", "Deneb", "Mimosa",
+                "Regulus", "Adhara", "Castor", "Gacrux", "Bellatrix", "Elnath",
+                "Miaplacidus", "Alnilam", "Alnair", "Alioth", "Dubhe", "Mirfak",
+                "Wezen", "Sargas", "Kaus Australis", "Avior", "Alkaid", "Menkalinan",
+                "Atria", "Alhena", "Peacock", "Alsephina", "Mirzam", "Alphard",
+                "Hamal", "Diphda", "Nunki", "Menkent", "Mizar", "Kochab", "Saiph",
+                "Denebola", "Algol", "Tiaki", "Muhlifain", "Aspidiske", "Suhail",
+                "Alphecca", "Mintaka", "Sadr", "Eltanin", "Schedar", "Naos",
+                "Almach", "Caph", "Izar", "Merak", "Enif", "Ankaa", "Phecda",
+                "Sabik", "Scheat", "Markab", "Aljanah", "Acrab", "Zubenelgenubi",
+                "Unukalhai", "Sheratan", "Phact", "Menkar", "Zaurak", "Tegmine",
+                "Kepler-186", "Trappist-1", "Proxima Cen", "Tau Ceti", "Epsilon Eri",
+                "Gliese 581", "Wolf 359", "Lalande 21185", "Ross 154", "EZ Aquarii"
+            ];
+            return names[index % names.length] + (index > 70 ? ` ${Math.floor(index/10)}` : '');
+        }
+
+        // State
+        let showLabels = true;
+        let showGrid = true;
+        let hoveredStar = null;
+        let animationFrame = null;
+
+        // Draw everything
+        function drawSky() {
+            // Clear with deep gradient
+            const gradient = ctx.createRadialGradient(canvas.width/2, canvas.height/2, 50, canvas.width/2, canvas.height/2, canvas.width);
+            gradient.addColorStop(0, '#0e0e24');
+            gradient.addColorStop(0.6, '#06060f');
+            gradient.addColorStop(1, '#030308');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw grid lines if enabled
+            if (showGrid) {
+                ctx.strokeStyle = 'rgba(110, 231, 255, 0.08)';
+                ctx.lineWidth = 1;
+                // Vertical lines (RA)
+                for (let i = 0; i <= 12; i++) {
+                    const x = (i / 12) * canvas.width;
+                    ctx.beginPath();
+                    ctx.moveTo(x, 0);
+                    ctx.lineTo(x, canvas.height);
+                    ctx.stroke();
+                }
+                // Horizontal lines (Dec)
+                for (let i = 0; i <= 6; i++) {
+                    const y = (i / 6) * canvas.height;
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(canvas.width, y);
+                    ctx.stroke();
+                }
+                // Accent labels
+                ctx.font = '10px "Space Grotesk", monospace';
+                ctx.fillStyle = 'rgba(110, 231, 255, 0.25)';
+                ctx.fillText('+90°', 8, 20);
+                ctx.fillText('+45°', 8, canvas.height * 0.25 + 4);
+                ctx.fillText('0°', 8, canvas.height * 0.5 + 4);
+                ctx.fillText('-45°', 8, canvas.height * 0.75 + 4);
+                ctx.fillText('-90°', 8, canvas.height - 8);
+            }
+
+            // Draw all stars
+            stars.forEach((star, idx) => {
+                // Glow for brighter stars
+                if (star.brightness > 0.7) {
+                    ctx.shadowColor = 'rgba(200, 220, 255, 0.6)';
+                    ctx.shadowBlur = 12;
+                } else {
+                    ctx.shadowBlur = 0;
+                }
+
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.radius, 0, Math.PI * 2);
+                
+                // Color based on brightness
+                const blueShift = star.brightness > 0.8 ? 40 : 0;
+                const color = `rgba(${200 + blueShift}, ${210 + blueShift}, 255, ${star.brightness})`;
+                ctx.fillStyle = color;
+                ctx.fill();
+
+                // Reset shadow for next elements
+                ctx.shadowBlur = 0;
+
+                // Hover effect
+                if (hoveredStar && hoveredStar.name === star.name) {
+                    ctx.beginPath();
+                    ctx.arc(star.x, star.y, star.radius + 6, 0, Math.PI * 2);
+                    ctx.strokeStyle = 'rgba(110, 231, 255, 0.9)';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                    // Crosshair
+                    ctx.beginPath();
+                    ctx.moveTo(star.x - 16, star.y);
+                    ctx.lineTo(star.x - 8, star.y);
+                    ctx.moveTo(star.x + 8, star.y);
+                    ctx.lineTo(star.x + 16, star.y);
+                    ctx.moveTo(star.x, star.y - 16);
+                    ctx.lineTo(star.x, star.y - 8);
+                    ctx.moveTo(star.x, star.y + 8);
+                    ctx.lineTo(star.x, star.y + 16);
+                    ctx.strokeStyle = 'rgba(110, 231, 255, 0.5)';
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
+
+                // Labels
+                if (showLabels && star.brightness > 0.55) {
+                    ctx.font = '9px "Space Grotesk", sans-serif';
+                    ctx.fillStyle = `rgba(180, 200, 255, ${star.brightness * 0.9})`;
+                    ctx.fillText(star.name, star.x + 10, star.y - 6);
+                }
+            });
+
+            // Draw constellation lines (some artistic lines)
+            ctx.strokeStyle = 'rgba(180, 140, 255, 0.2)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 6]);
+            
+            // Draw a few random constellation lines between bright stars
+            const brightStars = stars.filter(s => s.brightness > 0.7);
+            for (let i = 0; i < brightStars.length - 1; i += 2) {
+                if (i + 1 < brightStars.length) {
+                    ctx.beginPath();
+                    ctx.moveTo(brightStars[i].x, brightStars[i].y);
+                    ctx.lineTo(brightStars[i+1].x, brightStars[i+1].y);
+                    ctx.stroke();
+                }
+            }
+            ctx.setLineDash([]);
+
+            // Update coordinate display based on mouse or center
+            const ra = (12.5).toFixed(2);
+            coordsDisplay.textContent = `RA: ${ra}h 00m · Dec: +45° 00'`;
+        }
+
+        // Animation loop for subtle twinkle effect
+        let time = 0;
+        function animate() {
+            time += 0.005;
+            // Slight twinkle: we'll just redraw occasionally, but for performance we can skip
+            // For simplicity, we redraw only when needed; but to make twinkle we'd need to update.
+            // Instead, we'll just draw static and use CSS for starfield animation.
+            // Actually, let's add a subtle twinkle by redrawing with alpha modulation? 
+            // But we don't want to kill performance, so let's not do continuous redraw.
+            // We'll just draw once and handle hover via separate overlay? 
+            // We'll draw once and re-draw on hover.
+            // But we already have drawSky(), so we'll call it once and on mouse events.
+        }
+
+        // Initial draw
+        drawSky();
+
+        // Mouse move handler for hover and tooltip
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const mouseX = (e.clientX - rect.left) * scaleX;
+            const mouseY = (e.clientY - rect.top) * scaleY;
+
+            // Find closest star within 15px
+            let closest = null;
+            let minDist = 20;
+            stars.forEach(star => {
+                const dx = star.x - mouseX;
+                const dy = star.y - mouseY;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                if (dist < minDist) {
+                    minDist = dist;
+                    closest = star;
+                }
+            });
+
+            if (closest !== hoveredStar) {
+                hoveredStar = closest;
+                drawSky(); // redraw with highlight
+            }
+
+            // Tooltip
+            if (hoveredStar) {
+                const tooltipX = e.clientX + 15;
+                const tooltipY = e.clientY - 40;
+                tooltip.style.left = tooltipX + 'px';
+                tooltip.style.top = tooltipY + 'px';
+                tooltip.style.opacity = 1;
+                tooltip.innerHTML = `⭐ <strong>${hoveredStar.name}</strong><br><span style="font-size:0.7rem;color:#a0a0d0;">mag ${(hoveredStar.brightness * 6).toFixed(1)} · RA ${(hoveredStar.x / canvas.width * 24).toFixed(1)}h</span>`;
+            } else {
+                tooltip.style.opacity = 0;
+            }
+
+            // Update coordinates display
+            const ra = (mouseX / canvas.width * 24).toFixed(2);
+            const dec = (90 - (mouseY / canvas.height * 180)).toFixed(1);
+            coordsDisplay.textContent = `RA: ${ra}h · Dec: ${dec > 0 ? '+' : ''}${dec}°`;
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            hoveredStar = null;
+            tooltip.style.opacity = 0;
+            drawSky();
+            coordsDisplay.textContent = `RA: 12h 34m · Dec: +45° 12'`;
+        });
+
+        // Toggle controls
+        document.getElementById('toggleLabels').addEventListener('click', function() {
+            showLabels = !showLabels;
+            this.classList.toggle('active', showLabels);
+            drawSky();
+        });
+
+        document.getElementById('toggleGrid').addEventListener('click', function() {
+            showGrid = !showGrid;
+            this.classList.toggle('active', showGrid);
+            drawSky();
+        });
+
+        document.getElementById('resetView').addEventListener('click', () => {
+            showLabels = true;
+            showGrid = true;
+            document.getElementById('toggleLabels').classList.add('active');
+            document.getElementById('toggleGrid').classList.add('active');
+            drawSky();
+        });
+
+        // ============================================================
+        //  BUTTON INTERACTIONS
+        // ============================================================
+        document.getElementById('exploreBtn').addEventListener('click', () => {
+            document.querySelector('.sky-map-section').scrollIntoView({ behavior: 'smooth' });
+        });
+
+        document.getElementById('randomBtn').addEventListener('click', () => {
+            // Pick a random deep sky object and highlight it in the table
+            const rows = document.querySelectorAll('#deepSkyBody tr');
+            if (rows.length > 0) {
+                const randomIndex = Math.floor(Math.random() * rows.length);
+                const row = rows[randomIndex];
+                row.style.transition = 'background 0.3s';
+                row.style.background = 'rgba(110, 231, 255, 0.2)';
+                setTimeout(() => {
+                    row.style.background = '';
+                }, 1000);
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        });
+
+        // ============================================================
+        //  RESIZE HANDLING (optional, but keep canvas crisp)
+        // ============================================================
+        function resizeCanvas() {
+            const container = canvas.parentElement;
+            const width = container.clientWidth;
+            // Keep aspect ratio? We'll just set width, height stays 480
+            // But we need to scale stars? Better to keep internal resolution fixed.
+            // We'll keep canvas internal size fixed and use CSS to scale.
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // ============================================================
+        //  ANIMATION LOOP for subtle canvas twinkle (optional)
+        //  We'll skip continuous redraw to save resources, but we can 
+        //  add a small twinkle by redrawing every few frames? No, let's not.
+        //  Instead, we can add CSS animations on canvas? Not needed.
+        //  But to make it feel alive, we can add a slight opacity pulse on 
+        //  the whole canvas? No.
+        //  We'll instead do a very light twinkle by redrawing every 2 seconds? 
+        //  Actually, let's add a slow twinkle by using requestAnimationFrame 
+        //  but only updating the alpha of a few stars? Too complex.
+        //  We'll keep static and rely on the starfield CSS for motion.
+        
+        // However, we can do one nice thing: a slow rotation of the grid? 
+        // Not necessary.
+
+        // Final draw
+        drawSky();
+
+        // Easter egg: console log
+        console.log('%c✦ Celestial Atlas loaded — 1000+ lines of cosmic beauty ✦', 'color: #6ee7ff; font-size: 14px; font-weight: bold;');
+    </script>
+</body>
+</html>
