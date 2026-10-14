@@ -56,6 +56,17 @@ NOTEPADPP_CANDIDATES = [
     r"C:\Program Files\Notepad++\notepad++",
 ]
 
+NPP_MIN_CONFIG = """<?xml version="1.0" encoding="UTF-8" ?>
+<NotepadPlus>
+    <GUIConfigs>
+        <GUIConfig name="AutoIndent">0</GUIConfig>
+        <GUIConfig name="AutoCompletion">0</GUIConfig>
+        <GUIConfig name="Auto-Completion">0</GUIConfig>
+        <GUIConfig name="CaretLineFrame">1</GUIConfig>
+    </GUIConfigs>
+</NotepadPlus>
+"""
+
 
 @dataclass
 class Config:
@@ -93,12 +104,14 @@ class Config:
     save_every_chars_html: int = 40
     save_every_chars_other: int = 120
     save_every_seconds: float = 6.0
+    verify_after_save: bool = True
 
     np_launch_timeout: float = 15.0
     np_close_timeout: float = 6.0
     np_poll_interval: float = 0.2
     np_focus_check_every_chars: int = 20
     np_usable_wait_max: float = 30.0
+    npp_settings_dir: Path = BASE / "npp_settings"
 
     hover_min_points: int = 2
     hover_max_points: int = 5
@@ -162,6 +175,15 @@ class Logger:
 
 
 log = Logger.get()
+
+
+def ensure_npp_settings() -> Path:
+    d = CFG.npp_settings_dir
+    d.mkdir(parents=True, exist_ok=True)
+    cfg = d / "config.xml"
+    if not cfg.exists():
+        cfg.write_text(NPP_MIN_CONFIG, encoding="utf-8")
+    return d
 
 
 class _InputShield:
@@ -346,8 +368,14 @@ class NppWindow:
 
     def open(self, file_path: Path) -> None:
         npp = find_notepadpp()
-        log.info(f"launching Notepad++ for {file_path.name}")
-        self.proc = subprocess.Popen([npp, str(file_path)])
+        settings_dir = ensure_npp_settings()
+        log.info(f"launching Notepad++ for {file_path.name} "
+                 f"(settings dir: {settings_dir})")
+        self.proc = subprocess.Popen([
+            npp,
+            f"-settingsDir={settings_dir}",
+            str(file_path),
+        ])
         self.target_path = file_path
         self.window = self._wait_for_window(
             file_path.name, timeout=CFG.np_launch_timeout
@@ -431,6 +459,8 @@ class Typer:
         self.monitor = monitor
         self._last_save_time = 0.0
         self._active_window: Optional[NppWindow] = None
+        self._expected_prefix: str = ""
+        self._save_path: Optional[Path] = None
 
     def bind_window(self, npp: Optional[NppWindow]) -> None:
         self._active_window = npp
@@ -481,6 +511,9 @@ class Typer:
 
     def type_content(self, text: str, save_path: Path, is_html: bool,
                      end_time: float) -> bool:
+        self._save_path = save_path
+        self._expected_prefix = ""
+
         chars_since_save = 0
         chars_since_break = 0
         chars_since_focus_check = 0
@@ -520,6 +553,7 @@ class Typer:
 
             if ch == "\n":
                 self._guarded_send(lambda: pyautogui.press("enter"))
+                self._expected_prefix += "\n"
                 self._sleep(random.uniform(
                     CFG.typing_newline_pause_min, CFG.typing_newline_pause_max
                 ), end_time)
@@ -529,11 +563,13 @@ class Typer:
                         return False
             elif ch == "\t":
                 self._guarded_send(lambda: pyautogui.press("tab"))
+                self._expected_prefix += "\t"
                 self._sleep(random.uniform(
                     CFG.typing_indent_pause_min, CFG.typing_indent_pause_max
                 ), end_time)
             else:
                 self._guarded_send(lambda c=ch: pyautogui.write(c, interval=0))
+                self._expected_prefix += ch
                 self._sleep(self._char_delay(), end_time)
 
             chars_since_save += 1
@@ -609,8 +645,34 @@ class Typer:
         try:
             self._guarded_send(lambda: pyautogui.hotkey("ctrl", "s"))
             time.sleep(0.08)
+            if CFG.verify_after_save:
+                self._verify_prefix()
         except Exception as e:
             log.debug(f"save failed: {e}")
+
+    def _verify_prefix(self) -> None:
+        if self._save_path is None or not self._save_path.exists():
+            return
+        try:
+            actual = self._save_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            log.debug(f"verify read failed: {e}")
+            return
+        expected = self._expected_prefix
+        if not actual.startswith(expected):
+            idx = self._first_mismatch(expected, actual)
+            log.warning(
+                f"file drift detected in {self._save_path.name}: "
+                f"first mismatch at char {idx} "
+                f"(expected {len(expected)} chars, got {len(actual)})"
+            )
+
+    @staticmethod
+    def _first_mismatch(a: str, b: str) -> int:
+        for i, (x, y) in enumerate(zip(a, b)):
+            if x != y:
+                return i
+        return min(len(a), len(b))
 
     def _sleep(self, seconds: float, end_time: float) -> None:
         sleep_responsive(seconds, end_time, self.monitor)
@@ -778,6 +840,7 @@ class BotController:
     def _run(self) -> None:
         try:
             self._state = "running"
+            ensure_npp_settings()
             self._scaffold_project()
 
             self._flask = FlaskServer(
