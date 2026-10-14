@@ -45,10 +45,11 @@ def _base_dir() -> Path:
 
 
 BASE = _base_dir()
-PROJECT_ROOT = Path.home() / "Desktop" / "logbot_project"
+PROJECT_ROOT = BASE / "workspace"
 LOG_FILE = BASE / "webdevbot.log"
 
 ALLOWED_EXTS = {".html", ".htm", ".css", ".js"}
+_INVALID_WIN_CHARS = set('<>:"|?*')
 
 NOTEPADPP_CANDIDATES = [
     r"C:\Program Files\Notepad++\notepad++.exe",
@@ -126,6 +127,8 @@ class Config:
     flask_host: str = "127.0.0.1"
     flask_port: int = 5500
 
+    clean_workspace_on_start: bool = False
+
     log_level: int = logging.INFO
 
 
@@ -159,7 +162,7 @@ class Logger:
             lg = logging.getLogger("webdevbot")
             lg.setLevel(CFG.log_level)
             fmt = logging.Formatter(
-                "%(asctime)s [%(levelname)s] %(threadName)s %(message)s",
+                "%(asctime)s [%(levelname)s] [%(threadName)s] %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
             fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
@@ -292,38 +295,73 @@ class ProjectTree:
         self.files: dict = {}
         self.entry: str = "index.html"
 
+    @staticmethod
+    def _normalize(rel_path: str) -> str:
+        if rel_path is None:
+            raise ValueError("path is empty")
+        p = rel_path.replace("\\", "/").strip()
+        if not p:
+            raise ValueError("path is empty")
+        if "\x00" in p:
+            raise ValueError("path contains null byte")
+        if p.startswith("/"):
+            raise ValueError(f"absolute paths are not allowed: {rel_path!r}")
+        if len(p) >= 2 and p[1] == ":" and p[0].isalpha():
+            raise ValueError(f"drive-letter paths are not allowed: {rel_path!r}")
+        parts = [seg for seg in p.split("/") if seg not in ("", ".")]
+        if any(seg == ".." for seg in parts):
+            raise ValueError(f"parent traversal is not allowed: {rel_path!r}")
+        for seg in parts:
+            if any(ch in _INVALID_WIN_CHARS for ch in seg):
+                raise ValueError(f"invalid character in path segment {seg!r}")
+            if seg.endswith(" ") or seg.endswith("."):
+                raise ValueError(f"path segment cannot end with space or dot: {seg!r}")
+        if not parts:
+            raise ValueError("path is empty after normalization")
+        return "/".join(parts)
+
+    @staticmethod
+    def resolve_under(root: Path, rel_path: str) -> Path:
+        clean = ProjectTree._normalize(rel_path)
+        candidate = (root / clean).resolve()
+        root_resolved = root.resolve()
+        try:
+            candidate.relative_to(root_resolved)
+        except ValueError:
+            raise ValueError(f"resolved path escapes workspace: {rel_path!r}")
+        return candidate
+
     def add_folder(self, path: str) -> None:
-        path = path.replace("\\", "/").strip("/")
-        if not path:
-            return
-        parts = path.split("/")
+        clean = self._normalize(path)
+        parts = clean.split("/")
         acc = []
         for p in parts:
             acc.append(p)
             self.folders.add("/".join(acc))
 
     def add_file(self, path: str, content: str = "") -> None:
-        path = path.replace("\\", "/").strip("/")
-        if not path:
-            return
-        if "/" in path:
-            self.add_folder("/".join(path.split("/")[:-1]))
-        ext = Path(path).suffix.lower()
+        clean = self._normalize(path)
+        if "/" in clean:
+            self.add_folder("/".join(clean.split("/")[:-1]))
+        ext = Path(clean).suffix.lower()
         if ext not in ALLOWED_EXTS:
             raise ValueError(
                 f"Unsupported extension '{ext}'. Allowed: {sorted(ALLOWED_EXTS)}"
             )
-        self.files[path] = content
+        self.files[clean] = content
 
     def remove(self, path: str) -> None:
-        path = path.replace("\\", "/").strip("/")
-        if path in self.files:
-            del self.files[path]
+        try:
+            clean = self._normalize(path)
+        except ValueError:
             return
-        for f in [p for p in self.files if p.startswith(path + "/")]:
+        if clean in self.files:
+            del self.files[clean]
+            return
+        for f in [p for p in self.files if p.startswith(clean + "/")]:
             del self.files[f]
-        self.folders.discard(path)
-        for d in [p for p in self.folders if p.startswith(path + "/")]:
+        self.folders.discard(clean)
+        for d in [p for p in self.folders if p.startswith(clean + "/")]:
             self.folders.discard(d)
 
     def ordered_writes(self) -> list:
@@ -365,6 +403,7 @@ class NppWindow:
         self.proc: Optional[subprocess.Popen] = None
         self.window = None
         self.target_path: Optional[Path] = None
+        self._owned = False
 
     def open(self, file_path: Path) -> None:
         npp = find_notepadpp()
@@ -377,11 +416,20 @@ class NppWindow:
             str(file_path),
         ])
         self.target_path = file_path
-        self.window = self._wait_for_window(
-            file_path.name, timeout=CFG.np_launch_timeout
-        )
+        try:
+            self.window = self._wait_for_window(
+                file_path.name,
+                timeout=CFG.np_launch_timeout,
+                pid=self.proc.pid,
+            )
+            self._owned = True
+        except TimeoutError:
+            log.warning(f"Notepad++ for {file_path.name} did not appear in "
+                        f"{CFG.np_launch_timeout}s - abandoning")
+            self._owned = False
+            raise
 
-    def _wait_for_window(self, title_hint: str, timeout: float):
+    def _wait_for_window(self, title_hint: str, timeout: float, pid: int):
         deadline = time.time() + timeout
         pattern = r".*" + re.escape(title_hint) + r".*"
         while time.time() < deadline:
@@ -394,8 +442,13 @@ class NppWindow:
                 )
                 for w in wins:
                     try:
-                        if w.is_visible() and w.is_enabled():
-                            return w
+                        if not (w.is_visible() and w.is_enabled()):
+                            continue
+                        try:
+                            if w.process_id() == pid:
+                                return w
+                        except Exception:
+                            continue
                     except Exception:
                         continue
             except ElementNotFoundError:
@@ -408,9 +461,9 @@ class NppWindow:
         )
 
     def is_usable(self) -> bool:
+        if self.window is None or not self._owned:
+            return False
         try:
-            if self.window is None:
-                return False
             if self.window.is_minimized():
                 return False
             return bool(self.window.is_visible())
@@ -418,7 +471,7 @@ class NppWindow:
             return False
 
     def focus(self) -> None:
-        if self.window is None:
+        if self.window is None or not self._owned:
             return
         try:
             if self.window.is_minimized():
@@ -430,28 +483,34 @@ class NppWindow:
             log.debug(f"npp focus: {e}")
 
     def close(self) -> None:
+        if not self._owned:
+            self.proc = None
+            self.window = None
+            return
+
+        name = self.target_path.name if self.target_path else "?"
+        log.info(f"closing Notepad++ for {name}")
+
         try:
             if self.window is not None:
                 self.window.close()
         except Exception as e:
             log.debug(f"npp close: {e}")
-        try:
-            if self.proc is not None:
-                deadline = time.time() + CFG.np_close_timeout
-                while time.time() < deadline:
-                    if self.proc.poll() is not None:
-                        break
-                    time.sleep(0.1)
-                if self.proc.poll() is None:
-                    self.proc.terminate()
-                    try:
-                        self.proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        self.proc.kill()
-        except Exception as e:
-            log.debug(f"npp proc cleanup: {e}")
+
+        if self.proc is not None:
+            deadline = time.time() + CFG.np_close_timeout
+            while time.time() < deadline:
+                if self.proc.poll() is not None:
+                    break
+                time.sleep(0.15)
+            if self.proc.poll() is None:
+                log.warning(
+                    "notepad++ did not exit after WM_CLOSE - leaving it open"
+                )
+
         self.proc = None
         self.window = None
+        self._owned = False
 
 
 class Typer:
@@ -901,12 +960,39 @@ class BotController:
 
     def _scaffold_project(self) -> None:
         PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
+
+        if CFG.clean_workspace_on_start:
+            log.warning(f"cleaning workspace: {PROJECT_ROOT}")
+            for child in PROJECT_ROOT.iterdir():
+                try:
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=False)
+                    else:
+                        child.unlink()
+                except Exception as e:
+                    log.warning(f"clean failed for {child}: {e}")
+
         for folder in sorted(self._tree.folders):
-            (PROJECT_ROOT / folder).mkdir(parents=True, exist_ok=True)
+            target = ProjectTree.resolve_under(PROJECT_ROOT, folder)
+            target.mkdir(parents=True, exist_ok=True)
+
         for path, _ in self._tree.ordered_writes():
-            target = PROJECT_ROOT / path
+            target = ProjectTree.resolve_under(PROJECT_ROOT, path)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("", encoding="utf-8")
+            existed = target.exists()
+            try:
+                target.write_text("", encoding="utf-8")
+            except Exception as e:
+                log.error(f"could not truncate {target}: {e}")
+                raise
+            size = target.stat().st_size
+            if size != 0:
+                raise RuntimeError(
+                    f"file was not truncated cleanly: {target} is {size} bytes"
+                )
+            action = "truncated existing" if existed else "created new"
+            log.info(f"{action}: {path}")
+
         log.info(f"scaffolded {len(self._tree.folders)} folder(s) and "
                  f"{len(self._tree.files)} file(s) under {PROJECT_ROOT}")
 
@@ -914,10 +1000,17 @@ class BotController:
                    end_time: float) -> None:
         if self._stop_event.is_set() or time.time() >= end_time:
             return
-        target = PROJECT_ROOT / rel_path
+        target = ProjectTree.resolve_under(PROJECT_ROOT, rel_path)
+        if not target.exists():
+            log.warning(f"{rel_path} vanished before typing - recreating empty")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("", encoding="utf-8")
+
         npp = NppWindow(self._monitor)
+        opened = False
         try:
             npp.open(target)
+            opened = True
             if not npp.is_usable():
                 log.warning(f"notepad++ for {rel_path} is minimized or hidden - "
                             f"waiting for user to bring it up")
@@ -927,6 +1020,7 @@ class BotController:
                 if not self._wait_for_npp_usable(npp, end_time):
                     log.warning(f"giving up on {rel_path}")
                     return
+            self._select_all_and_clear()
             typer.bind_window(npp)
             is_html = target.suffix.lower() in (".html", ".htm")
             log.info(f"typing {rel_path} ({len(content)} chars)")
@@ -936,7 +1030,12 @@ class BotController:
             log.error(f"typing {rel_path} failed: {e}")
         finally:
             typer.bind_window(None)
-            npp.close()
+            if opened and npp._owned:
+                npp.close()
+            else:
+                npp.proc = None
+                npp.window = None
+                npp._owned = False
             time.sleep(0.25)
 
     def _wait_for_npp_usable(self, npp: NppWindow, end_time: float) -> bool:
@@ -1198,7 +1297,8 @@ class ProjectPanel(tk.Frame):
                 kind, rel = values[0], values[1]
                 parent = rel if kind == "folder" else "/".join(rel.split("/")[:-1])
         name = simpledialog.askstring(
-            "New file", "Path relative to project root (e.g. index.html or js/app.js):",
+            "New file",
+            "Path relative to project root (e.g. index.html or js/app.js):",
             initialvalue=(parent + "/" if parent else "") + "new.html",
             parent=self,
         )
@@ -1207,7 +1307,10 @@ class ProjectPanel(tk.Frame):
         try:
             self.tree_data.add_file(name.strip(), "")
         except ValueError as e:
-            messagebox.showerror("Unsupported", str(e))
+            messagebox.showerror(
+                "Path rejected",
+                f"{e}\n\nThe bot only writes inside its own workspace folder.",
+            )
             return
         self.refresh()
         self._select_path(name.strip())
@@ -1222,13 +1325,21 @@ class ProjectPanel(tk.Frame):
                 kind, rel = values[0], values[1]
                 parent = rel if kind == "folder" else "/".join(rel.split("/")[:-1])
         name = simpledialog.askstring(
-            "New folder", "Folder path relative to project root:",
+            "New folder",
+            "Folder path relative to project root:",
             initialvalue=(parent + "/" if parent else "") + "assets",
             parent=self,
         )
         if not name:
             return
-        self.tree_data.add_folder(name.strip())
+        try:
+            self.tree_data.add_folder(name.strip())
+        except ValueError as e:
+            messagebox.showerror(
+                "Path rejected",
+                f"{e}\n\nThe bot only writes inside its own workspace folder.",
+            )
+            return
         self.refresh()
         self.on_change()
 
