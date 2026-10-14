@@ -9,13 +9,12 @@ import logging
 import subprocess
 import queue
 import shutil
-import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
+from tkinter import ttk, scrolledtext, messagebox, simpledialog
 
 try:
     import pyautogui
@@ -98,6 +97,8 @@ class Config:
     np_launch_timeout: float = 15.0
     np_close_timeout: float = 6.0
     np_poll_interval: float = 0.2
+    np_focus_check_every_chars: int = 20
+    np_usable_wait_max: float = 30.0
 
     hover_min_points: int = 2
     hover_max_points: int = 5
@@ -348,9 +349,9 @@ class NppWindow:
         log.info(f"launching Notepad++ for {file_path.name}")
         self.proc = subprocess.Popen([npp, str(file_path)])
         self.target_path = file_path
-        self.window = self._wait_for_window(file_path.name, timeout=CFG.np_launch_timeout)
-        self._ensure_not_minimized()
-        self._ensure_maximized()
+        self.window = self._wait_for_window(
+            file_path.name, timeout=CFG.np_launch_timeout
+        )
 
     def _wait_for_window(self, title_hint: str, timeout: float):
         deadline = time.time() + timeout
@@ -360,7 +361,9 @@ class NppWindow:
                 time.sleep(CFG.np_poll_interval)
                 continue
             try:
-                wins = Desktop(backend="uia").windows(title_re=pattern, visible_only=True)
+                wins = Desktop(backend="uia").windows(
+                    title_re=pattern, visible_only=True
+                )
                 for w in wins:
                     try:
                         if w.is_visible() and w.is_enabled():
@@ -372,51 +375,31 @@ class NppWindow:
             except Exception as e:
                 log.debug(f"npp poll: {e}")
             time.sleep(CFG.np_poll_interval)
-        raise TimeoutError(f"Notepad++ window for '{title_hint}' not found within {timeout}s")
+        raise TimeoutError(
+            f"Notepad++ window for '{title_hint}' not found within {timeout}s"
+        )
 
-    def _ensure_not_minimized(self) -> None:
-        if self.window is None:
-            return
+    def is_usable(self) -> bool:
         try:
+            if self.window is None:
+                return False
             if self.window.is_minimized():
-                log.info("notepad++ was minimized - restoring")
-                self.window.restore()
-                time.sleep(0.2)
-        except Exception as e:
-            log.debug(f"restore failed: {e}")
-
-    def _ensure_maximized(self) -> None:
-        if self.window is None:
-            return
-        try:
-            if not self.window.is_maximized():
-                self.window.maximize()
-                time.sleep(0.2)
-        except Exception as e:
-            log.debug(f"maximize failed: {e}")
+                return False
+            return bool(self.window.is_visible())
+        except Exception:
+            return False
 
     def focus(self) -> None:
         if self.window is None:
             return
         try:
             if self.window.is_minimized():
-                self.window.restore()
-                time.sleep(0.15)
-            if not self.window.is_maximized():
-                self.window.maximize()
-                time.sleep(0.15)
+                log.debug("notepad++ minimized - not restoring on our own")
+                return
             self.window.set_focus()
             time.sleep(0.15)
         except Exception as e:
             log.debug(f"npp focus: {e}")
-
-    def is_alive(self) -> bool:
-        if self.window is None:
-            return False
-        try:
-            return bool(self.window.is_visible())
-        except Exception:
-            return False
 
     def close(self) -> None:
         try:
@@ -447,10 +430,10 @@ class Typer:
     def __init__(self, monitor: UserActivityMonitor):
         self.monitor = monitor
         self._last_save_time = 0.0
-        self._active_window = None
+        self._active_window: Optional[NppWindow] = None
 
-    def bind_window(self, window) -> None:
-        self._active_window = window
+    def bind_window(self, npp: Optional[NppWindow]) -> None:
+        self._active_window = npp
 
     def _guarded_send(self, fn: Callable[[], Any]) -> Any:
         with self.monitor.input_shield():
@@ -461,15 +444,55 @@ class Typer:
             return random.uniform(CFG.typing_delay_burst_min, CFG.typing_delay_burst_max)
         return random.uniform(CFG.typing_delay_min, CFG.typing_delay_max)
 
+    def _is_usable(self) -> bool:
+        return self._active_window is not None and self._active_window.is_usable()
+
+    def _refocus(self) -> None:
+        if self._active_window is None:
+            return
+        if not self._active_window.is_usable():
+            return
+        try:
+            self._active_window.focus()
+            time.sleep(CFG.typing_break_return_settle)
+            with self.monitor.input_shield():
+                pyautogui.hotkey("ctrl", "end")
+                time.sleep(0.05)
+        except Exception as e:
+            log.debug(f"refocus failed: {e}")
+
+    def _wait_for_usable(self, end_time: float) -> bool:
+        npp = self._active_window
+        if npp is None:
+            return False
+        give_up_at = time.time() + CFG.np_usable_wait_max
+        while not npp.is_usable():
+            if time.time() >= end_time:
+                return False
+            if time.time() >= give_up_at:
+                log.warning("notepad++ stayed unusable - giving up on this file")
+                return False
+            if self.monitor.user_is_active():
+                if not self.monitor.wait_until_user_idle(end_time):
+                    return False
+            time.sleep(0.3)
+        self._refocus()
+        return True
+
     def type_content(self, text: str, save_path: Path, is_html: bool,
                      end_time: float) -> bool:
         chars_since_save = 0
         chars_since_break = 0
+        chars_since_focus_check = 0
         next_break_at = random.randint(
             CFG.typing_break_chunk_size_min, CFG.typing_break_chunk_size_max
         )
         save_every = CFG.save_every_chars_html if is_html else CFG.save_every_chars_other
         self._last_save_time = time.time()
+
+        if not self._is_usable():
+            if not self._wait_for_usable(end_time):
+                return False
 
         for ch in text:
             if time.time() >= end_time:
@@ -481,7 +504,19 @@ class Typer:
                 if not self.monitor.wait_until_user_idle(end_time):
                     self._save()
                     return False
-                self._refocus_editor()
+                if not self._wait_for_usable(end_time):
+                    self._save()
+                    return False
+
+            if chars_since_focus_check >= CFG.np_focus_check_every_chars:
+                chars_since_focus_check = 0
+                if not self._is_usable():
+                    log.info("editor not usable - pausing until it comes back")
+                    if not self._wait_for_usable(end_time):
+                        self._save()
+                        return False
+                else:
+                    self._refocus()
 
             if ch == "\n":
                 self._guarded_send(lambda: pyautogui.press("enter"))
@@ -503,6 +538,7 @@ class Typer:
 
             chars_since_save += 1
             chars_since_break += 1
+            chars_since_focus_check += 1
 
             if ch == " ":
                 self._sleep(random.uniform(
@@ -519,7 +555,8 @@ class Typer:
                 ), end_time)
 
             now = time.time()
-            if chars_since_save >= save_every or (now - self._last_save_time) >= CFG.save_every_seconds:
+            if (chars_since_save >= save_every
+                    or (now - self._last_save_time) >= CFG.save_every_seconds):
                 self._save()
                 chars_since_save = 0
                 self._last_save_time = now
@@ -566,29 +603,7 @@ class Typer:
         if time.time() >= end_time:
             return False
 
-        self._refocus_editor()
-        return True
-
-    def _refocus_editor(self) -> None:
-        if self._active_window is None:
-            return
-        try:
-            if self._active_window.is_minimized():
-                log.info("notepad++ minimized mid-session - restoring")
-                self._active_window.restore()
-                time.sleep(0.2)
-            if not self._active_window.is_maximized():
-                self._active_window.maximize()
-                time.sleep(0.2)
-            self._active_window.set_focus()
-            time.sleep(CFG.typing_break_return_settle)
-            with self.monitor.input_shield():
-                pyautogui.click()
-                time.sleep(0.06)
-                pyautogui.hotkey("ctrl", "end")
-                time.sleep(0.05)
-        except Exception as e:
-            log.debug(f"refocus failed: {e}")
+        return self._wait_for_usable(end_time)
 
     def _save(self) -> None:
         try:
@@ -735,7 +750,6 @@ class BotController:
         self._duration_seconds: float = 0.0
         self._stop_event = threading.Event()
         self._state = "idle"
-        self._current_npp: Optional[NppWindow] = None
 
     def state(self) -> str:
         return self._state
@@ -771,10 +785,10 @@ class BotController:
             )
             self._flask.start()
             time.sleep(0.4)
-            try:
-                webbrowser.open(f"http://{CFG.flask_host}:{CFG.flask_port}/")
-            except Exception:
-                pass
+            log.info(
+                f"preview available at http://{CFG.flask_host}:{CFG.flask_port}/ "
+                f"(open it manually whenever you like)"
+            )
 
             self._monitor = UserActivityMonitor()
             self._monitor.start()
@@ -839,13 +853,18 @@ class BotController:
             return
         target = PROJECT_ROOT / rel_path
         npp = NppWindow(self._monitor)
-        self._current_npp = npp
         try:
             npp.open(target)
+            if not npp.is_usable():
+                log.warning(f"notepad++ for {rel_path} is minimized or hidden - "
+                            f"waiting for user to bring it up")
             npp.focus()
             time.sleep(0.35)
-            self._select_all_and_clear()
-            typer.bind_window(npp.window)
+            if not npp.is_usable():
+                if not self._wait_for_npp_usable(npp, end_time):
+                    log.warning(f"giving up on {rel_path}")
+                    return
+            typer.bind_window(npp)
             is_html = target.suffix.lower() in (".html", ".htm")
             log.info(f"typing {rel_path} ({len(content)} chars)")
             typer.type_content(content, target, is_html, end_time)
@@ -854,9 +873,24 @@ class BotController:
             log.error(f"typing {rel_path} failed: {e}")
         finally:
             typer.bind_window(None)
-            self._current_npp = None
             npp.close()
             time.sleep(0.25)
+
+    def _wait_for_npp_usable(self, npp: NppWindow, end_time: float) -> bool:
+        give_up_at = time.time() + CFG.np_usable_wait_max
+        while not npp.is_usable():
+            if self._stop_event.is_set() or time.time() >= end_time:
+                return False
+            if time.time() >= give_up_at:
+                log.warning("notepad++ stayed minimized - skipping this file")
+                return False
+            if self._monitor.user_is_active():
+                if not self._monitor.wait_until_user_idle(end_time):
+                    return False
+            time.sleep(0.3)
+        npp.focus()
+        time.sleep(0.25)
+        return True
 
     def _select_all_and_clear(self) -> None:
         try:
@@ -867,21 +901,6 @@ class BotController:
                 time.sleep(0.08)
         except Exception as e:
             log.debug(f"pre-clear failed: {e}")
-
-    def enforce_window_state(self) -> None:
-        npp = self._current_npp
-        if npp is None or npp.window is None:
-            return
-        try:
-            if npp.window.is_minimized():
-                log.info("notepad++ minimized detected - restoring to maximized")
-                npp.window.restore()
-                time.sleep(0.15)
-            if not npp.window.is_maximized():
-                npp.window.maximize()
-                time.sleep(0.15)
-        except Exception as e:
-            log.debug(f"window state enforcement failed: {e}")
 
 
 class Palette:
@@ -977,15 +996,38 @@ class StyledButton(tk.Label):
         self._bg = bg
         self._fg = fg
         self._cmd = command
+        self._enabled = True
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
-        self.bind("<Button-1>", lambda _e: self._cmd())
+        self.bind("<Button-1>", self._on_click)
 
     def _on_enter(self, _e):
+        if not self._enabled:
+            return
         self.configure(bg=self._hover_bg, fg=self._hover_fg)
 
     def _on_leave(self, _e):
+        if not self._enabled:
+            return
         self.configure(bg=self._bg, fg=self._fg)
+
+    def _on_click(self, _e):
+        if not self._enabled:
+            return
+        self._cmd()
+
+    def configure(self, **kwargs):
+        if "state" in kwargs:
+            state = kwargs.pop("state")
+            if state == "disabled":
+                self._enabled = False
+                kwargs.setdefault("bg", Palette.surface)
+                kwargs.setdefault("fg", Palette.text_muted)
+            elif state == "normal":
+                self._enabled = True
+                kwargs.setdefault("bg", self._bg)
+                kwargs.setdefault("fg", self._fg)
+        super().configure(**kwargs)
 
 
 class ProjectPanel(tk.Frame):
@@ -1061,8 +1103,6 @@ class ProjectPanel(tk.Frame):
         if kind == "file":
             self.current = rel
             self.on_select(rel)
-        else:
-            self.current = None
 
     def _on_right_click(self, event):
         item = self.treeview.identify_row(event.y)
@@ -1080,8 +1120,7 @@ class ProjectPanel(tk.Frame):
         if kind == "file":
             menu.add_command(label="Set as entry file",
                              command=lambda r=rel: self._set_entry(r))
-        menu.add_command(label="Remove",
-                         command=self._remove_selected)
+        menu.add_command(label="Remove", command=self._remove_selected)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1102,14 +1141,13 @@ class ProjectPanel(tk.Frame):
         )
         if not name:
             return
-        name = name.strip()
         try:
-            self.tree_data.add_file(name, "")
+            self.tree_data.add_file(name.strip(), "")
         except ValueError as e:
             messagebox.showerror("Unsupported", str(e))
             return
         self.refresh()
-        self._select_path(name)
+        self._select_path(name.strip())
         self.on_change()
 
     def _new_folder(self):
@@ -1127,7 +1165,7 @@ class ProjectPanel(tk.Frame):
         )
         if not name:
             return
-        self.tree_data.add_folder(name)
+        self.tree_data.add_folder(name.strip())
         self.refresh()
         self.on_change()
 
@@ -1171,11 +1209,7 @@ class ProjectPanel(tk.Frame):
         return False
 
     def refresh(self):
-        open_state = {}
-        for item in self.treeview.get_children(""):
-            open_state[item] = self.treeview.item(item, "open")
         self.treeview.delete(*self.treeview.get_children(""))
-
         root_nodes = {}
 
         def ensure(folder):
@@ -1198,7 +1232,7 @@ class ProjectPanel(tk.Frame):
             parent = "/".join(path.split("/")[:-1]) if "/" in path else ""
             parent_node = ensure(parent) if parent else ""
             name = path.split("/")[-1]
-            marker = " *" if path == self.tree_data.entry else ""
+            marker = "  *" if path == self.tree_data.entry else ""
             self.treeview.insert(
                 parent_node, "end", text="  " + name + marker,
                 values=("file", path),
@@ -1394,12 +1428,9 @@ class WebDevBotApp(tk.Tk):
                  bg=Palette.surface, fg=Palette.text_dim,
                  font=("Segoe UI", 9)).pack(anchor="w")
         self._entry_var = tk.StringVar(value=self._tree_data.entry)
-        entry_display = tk.Label(
-            row, textvariable=self._entry_var,
-            bg=Palette.surface, fg=Palette.accent,
-            font=("Segoe UI Semibold", 11),
-        )
-        entry_display.pack(anchor="w", pady=(4, 0))
+        tk.Label(row, textvariable=self._entry_var,
+                 bg=Palette.surface, fg=Palette.accent,
+                 font=("Segoe UI Semibold", 11)).pack(anchor="w", pady=(4, 0))
 
         btn_row = tk.Frame(controls, bg=Palette.surface)
         btn_row.pack(fill="x", pady=(16, 0))
@@ -1433,13 +1464,14 @@ class WebDevBotApp(tk.Tk):
             ).pack(fill="x", pady=2)
 
         tk.Label(
-            metrics_card.inner, text=f"Root\n{PROJECT_ROOT}",
+            metrics_card.inner,
+            text=f"Root\n{PROJECT_ROOT}",
             bg=Palette.surface, fg=Palette.text_muted,
             font=("Segoe UI", 8), justify="left", anchor="w",
         ).pack(fill="x", pady=(10, 0))
 
         log_card = RoundedCard(right, padding=16)
-        log_card.pack(fill="both", expand=True, pady=(0, 0))
+        log_card.pack(fill="both", expand=True)
 
         tk.Label(log_card.inner, text="Live Log",
                  bg=Palette.surface, fg=Palette.text_dim,
@@ -1570,7 +1602,8 @@ class WebDevBotApp(tk.Tk):
         }
         self._status_label.configure(fg=colors.get(state, Palette.text_dim))
 
-        if not self._controller.is_running() and str(self._stop_btn["state"]) == "normal":
+        if (not self._controller.is_running()
+                and str(self._stop_btn.cget("state")) == "normal"):
             self._set_running(False)
             self._start_time = None
 
@@ -1578,7 +1611,8 @@ class WebDevBotApp(tk.Tk):
 
     def _on_close(self):
         if self._controller.is_running():
-            if not messagebox.askyesno("WebDevBot", "A session is running. Stop and exit?"):
+            if not messagebox.askyesno("WebDevBot",
+                                       "A session is running. Stop and exit?"):
                 return
             self._controller.stop()
             deadline = time.time() + 5.0

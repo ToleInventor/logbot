@@ -4,3 +4,4 @@ pynput
 pywinauto
 pygetwindow
 psutil
+flask
