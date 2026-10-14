@@ -1,35 +1,42 @@
 import os
 import sys
+import re
 import time
-import math
-import glob
 import json
 import random
 import threading
 import logging
 import subprocess
 import queue
-import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+import shutil
+import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
+
 try:
     import pyautogui
-    import pygetwindow as gw
     import psutil
     from pynput import mouse as pynput_mouse, keyboard as pynput_keyboard
-    from pywinauto import Application, Desktop
+    from pywinauto import Desktop
     from pywinauto.findwindows import ElementNotFoundError
-    from pywinauto.keyboard import send_keys as uia_send_keys
 except ImportError as e:
     sys.stderr.write(f"Missing dependency: {e}\n")
-    sys.stderr.write("Run: pip install pyautogui pynput pywinauto pygetwindow psutil\n")
+    sys.stderr.write("Run: pip install pyautogui pynput pywinauto pygetwindow psutil flask\n")
+    raise
+
+try:
+    from flask import Flask, send_from_directory, abort
+except ImportError:
+    sys.stderr.write("Missing dependency: flask\n")
+    sys.stderr.write("Run: pip install flask\n")
     raise
 
 pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0.01
+pyautogui.PAUSE = 0.0
 
 
 def _base_dir() -> Path:
@@ -39,83 +46,71 @@ def _base_dir() -> Path:
 
 
 BASE = _base_dir()
+PROJECT_ROOT = Path.home() / "Desktop" / "logbot_project"
+LOG_FILE = BASE / "webdevbot.log"
+
+ALLOWED_EXTS = {".html", ".htm", ".css", ".js"}
+
+NOTEPADPP_CANDIDATES = [
+    r"C:\Program Files\Notepad++\notepad++.exe",
+    r"C:\Program Files (x86)\Notepad++\notepad++.exe",
+    r"C:\Program Files\Notepad++\notepad++",
+]
 
 
 @dataclass
 class Config:
-    idle_threshold: float = 1.2
+    idle_threshold: float = 1.0
     input_poll_interval: float = 0.03
-    startup_grace: float = 1.0
-    poll_interval: float = 0.15
-    window_timeout: float = 15.0
-    control_timeout: float = 10.0
-    action_retries: int = 3
-    action_retry_delay: float = 0.6
+    startup_grace: float = 0.6
 
-    wander_weights: dict = field(default_factory=lambda: {
-        "move": 30, "hover": 25, "jitter": 15, "scroll": 10,
-        "click_empty": 10, "rest": 10,
-    })
-    margin: int = 50
+    typing_delay_min: float = 0.035
+    typing_delay_max: float = 0.115
+    typing_delay_burst_chance: float = 0.22
+    typing_delay_burst_min: float = 0.005
+    typing_delay_burst_max: float = 0.030
+    typing_hesitation_chance: float = 0.028
+    typing_hesitation_min: float = 0.35
+    typing_hesitation_max: float = 1.25
+    typing_space_pause_min: float = 0.02
+    typing_space_pause_max: float = 0.12
+    typing_punct_pause_min: float = 0.06
+    typing_punct_pause_max: float = 0.28
+    typing_newline_pause_min: float = 0.12
+    typing_newline_pause_max: float = 0.55
+    typing_indent_pause_min: float = 0.03
+    typing_indent_pause_max: float = 0.10
 
-    allow_free_roam: bool = False
-    whitelisted_apps: tuple = ("notepad.exe", "explorer.exe")
-    whitelisted_window_classes: tuple = (
-        "Notepad", "CabinetWClass", "ExploreWClass",
-    )
+    typing_break_chance_per_line: float = 0.18
+    typing_break_chance_per_chunk: float = 0.06
+    typing_break_chunk_size_min: int = 40
+    typing_break_chunk_size_max: int = 140
+    typing_break_duration_min: float = 2.0
+    typing_break_duration_max: float = 12.0
+    typing_break_hover_min_points: int = 2
+    typing_break_hover_max_points: int = 5
+    typing_break_return_settle: float = 0.25
 
-    base_dir: Path = BASE
-    logbot_dir: Path = BASE
-    docs_dir: Path = BASE / "docs"
-    log_file: Path = BASE / "logbot.log"
+    save_every_chars_html: int = 40
+    save_every_chars_other: int = 120
+    save_every_seconds: float = 6.0
 
-    docs_glob: tuple = ("*.txt", "*.md", "*.csv", "*.log", "*.json", "*.rtf")
+    np_launch_timeout: float = 15.0
+    np_close_timeout: float = 6.0
+    np_poll_interval: float = 0.2
 
-    session_min_apps: int = 1
-    session_max_apps: int = 2
-    actions_per_app_min: int = 1
-    actions_per_app_max: int = 3
-    app_duration_min: float = 15.0
-    app_duration_max: float = 45.0
+    hover_min_points: int = 2
+    hover_max_points: int = 5
+    hover_dwell_min: float = 0.6
+    hover_dwell_max: float = 3.5
+    hover_idle_min: float = 4.0
+    hover_idle_max: float = 16.0
+    hover_move_duration_min: float = 0.5
+    hover_move_duration_max: float = 1.8
+    hover_margin: int = 80
 
-    typing_interval_min: float = 0.06
-    typing_interval_max: float = 0.18
-    typing_word_pause_min: float = 0.04
-    typing_word_pause_max: float = 0.22
-    typing_line_pause_min: float = 0.6
-    typing_line_pause_max: float = 1.8
-    typing_hesitation_chance: float = 0.06
-    typing_hesitation_min: float = 0.4
-    typing_hesitation_max: float = 1.4
-
-    rest_chance: float = 0.20
-    rest_min: float = 3.0
-    rest_max: float = 12.0
-    micro_pause_chance: float = 0.25
-    micro_pause_min: float = 0.15
-    micro_pause_max: float = 0.7
-
-    hover_break_chance: float = 0.25
-    hover_break_min_points: int = 2
-    hover_break_max_points: int = 6
-    hover_break_dwell_min: float = 0.4
-    hover_break_dwell_max: float = 2.5
-    hover_break_idle_min: float = 5.0
-    hover_break_idle_max: float = 20.0
-
-    click_empty_chance: float = 0.35
-
-    memory_high_watermark: float = 82.0
-    memory_low_watermark: float = 65.0
-    cpu_high_watermark: float = 88.0
-    cpu_sample_interval: float = 4.0
-    resource_check_interval: float = 20.0
-    min_free_memory_percent: float = 15.0
-    max_sandboxed_apps: int = 1
-    protect_own_pid: bool = True
-
-    freeze_detection_window: float = 25.0
-    freeze_poll_interval: float = 5.0
+    flask_host: str = "127.0.0.1"
+    flask_port: int = 5500
 
     log_level: int = logging.INFO
 
@@ -130,11 +125,7 @@ class UiLogQueue(logging.Handler):
 
     def emit(self, record):
         try:
-            msg = self.format(record)
-        except Exception:
-            return
-        try:
-            self.q.put_nowait(msg)
+            self.q.put_nowait(self.format(record))
         except Exception:
             pass
 
@@ -150,14 +141,14 @@ class Logger:
         with cls._lock:
             if cls._logger is not None:
                 return cls._logger
-            CFG.logbot_dir.mkdir(parents=True, exist_ok=True)
-            lg = logging.getLogger("logbot")
+            BASE.mkdir(parents=True, exist_ok=True)
+            lg = logging.getLogger("webdevbot")
             lg.setLevel(CFG.log_level)
             fmt = logging.Formatter(
                 "%(asctime)s [%(levelname)s] %(threadName)s %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
-            fh = logging.FileHandler(CFG.log_file, encoding="utf-8")
+            fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
             fh.setFormatter(fmt)
             lg.addHandler(fh)
             if sys.stdout is not None:
@@ -170,50 +161,6 @@ class Logger:
 
 
 log = Logger.get()
-
-
-class SafetyViolation(RuntimeError):
-    pass
-
-
-class SafetyGuard:
-    @staticmethod
-    def resolve_path(p) -> Path:
-        target = Path(p).resolve()
-        jail = CFG.logbot_dir.resolve()
-        try:
-            target.relative_to(jail)
-        except ValueError:
-            raise SafetyViolation(
-                f"Refused: path '{target}' is outside the sandbox '{jail}'."
-            )
-        return target
-
-    @staticmethod
-    def is_safe_exe(exe: str) -> bool:
-        name = Path(exe).name.lower()
-        return name in (a.lower() for a in CFG.whitelisted_apps)
-
-    @staticmethod
-    def is_safe_window(title: str, window_class: str = "") -> bool:
-        if CFG.allow_free_roam:
-            return True
-        if window_class and window_class in CFG.whitelisted_window_classes:
-            return True
-        title = (title or "").lower()
-        return ("notepad" in title) or ("file explorer" in title) or ("explorer" in title)
-
-    @staticmethod
-    def assert_safe_exe(exe: str) -> None:
-        if not SafetyGuard.is_safe_exe(exe):
-            raise SafetyViolation(f"Executable '{exe}' is not on the whitelist.")
-
-    @staticmethod
-    def assert_safe_window(title: str, cls: str = "") -> None:
-        if not SafetyGuard.is_safe_window(title, cls):
-            raise SafetyViolation(
-                f"Window '{title}' (class='{cls}') is not whitelisted."
-            )
 
 
 class _InputShield:
@@ -247,7 +194,6 @@ class UserActivityMonitor:
             self._armed = True
             self.last_input_time = 0.0
             self.user_in_control = False
-        log.info("monitor armed")
 
     def _on_user_input(self, *_a, **_k) -> None:
         if not self._armed:
@@ -258,7 +204,7 @@ class UserActivityMonitor:
             self.last_input_time = time.time()
             if not self.user_in_control:
                 self.user_in_control = True
-                log.info("user took control - bot pausing")
+                log.info("human input detected - all activity halted")
 
     def start(self) -> None:
         kb = pynput_keyboard.Listener(
@@ -297,9 +243,10 @@ class UserActivityMonitor:
                 return False
             if not was_active:
                 was_active = True
+                log.info("waiting for human to be idle...")
             time.sleep(CFG.input_poll_interval)
         if was_active:
-            log.info("user idle - bot resuming")
+            log.info("human idle - resuming")
         return True
 
 
@@ -316,113 +263,104 @@ def sleep_responsive(seconds: float, end_time: float, monitor: UserActivityMonit
     return True
 
 
-def get_screen_size():
-    return pyautogui.size()
+class ProjectTree:
+    def __init__(self):
+        self.folders: set = set()
+        self.files: dict = {}
+        self.entry: str = "index.html"
+
+    def add_folder(self, path: str) -> None:
+        path = path.replace("\\", "/").strip("/")
+        if not path:
+            return
+        parts = path.split("/")
+        acc = []
+        for p in parts:
+            acc.append(p)
+            self.folders.add("/".join(acc))
+
+    def add_file(self, path: str, content: str = "") -> None:
+        path = path.replace("\\", "/").strip("/")
+        if not path:
+            return
+        if "/" in path:
+            self.add_folder("/".join(path.split("/")[:-1]))
+        ext = Path(path).suffix.lower()
+        if ext not in ALLOWED_EXTS:
+            raise ValueError(
+                f"Unsupported extension '{ext}'. Allowed: {sorted(ALLOWED_EXTS)}"
+            )
+        self.files[path] = content
+
+    def remove(self, path: str) -> None:
+        path = path.replace("\\", "/").strip("/")
+        if path in self.files:
+            del self.files[path]
+            return
+        for f in [p for p in self.files if p.startswith(path + "/")]:
+            del self.files[f]
+        self.folders.discard(path)
+        for d in [p for p in self.folders if p.startswith(path + "/")]:
+            self.folders.discard(d)
+
+    def ordered_writes(self) -> list:
+        ordered = sorted(self.files.keys(), key=lambda p: (p.count("/"), p))
+        return [(p, self.files[p]) for p in ordered]
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "folders": sorted(self.folders),
+            "files": self.files,
+            "entry": self.entry,
+        }, indent=2)
+
+    @classmethod
+    def from_json(cls, s: str) -> "ProjectTree":
+        data = json.loads(s)
+        t = cls()
+        t.folders = set(data.get("folders", []))
+        t.files = dict(data.get("files", {}))
+        t.entry = data.get("entry", "index.html")
+        return t
 
 
-def random_point(width: int, height: int, margin: int = None):
-    m = margin if margin is not None else CFG.margin
-    x = random.randint(m, max(m + 1, width - m))
-    y = random.randint(m, max(m + 1, height - m))
-    return x, y
+def find_notepadpp() -> str:
+    for c in NOTEPADPP_CANDIDATES:
+        if Path(c).exists():
+            return c
+    which = shutil.which("notepad++") or shutil.which("notepad++.exe")
+    if which:
+        return which
+    raise FileNotFoundError(
+        "Notepad++ not found. Install it or edit NOTEPADPP_CANDIDATES in the script."
+    )
 
 
-class DocLibrary:
-    def __init__(self, folder: Path, patterns: tuple):
-        self.folder = folder
-        self.patterns = patterns
-        self.folder.mkdir(parents=True, exist_ok=True)
-        self._cache: list = []
-        self._lock = threading.Lock()
-
-    def refresh(self) -> None:
-        files = []
-        for pat in self.patterns:
-            files.extend(Path(p) for p in glob.glob(str(self.folder / pat)))
-        chunks = []
-        for f in files:
-            try:
-                raw = f.read_text(encoding="utf-8", errors="ignore")
-            except Exception as e:
-                log.warning(f"skipping {f.name}: {e}")
-                continue
-            cleaned = " ".join(raw.split())
-            if cleaned:
-                chunks.append(cleaned)
-        with self._lock:
-            self._cache = chunks
-        log.info(f"doc library loaded: {len(chunks)} file(s) from {self.folder}")
-
-    def sample(self, max_chars: int = 400) -> str:
-        with self._lock:
-            if not self._cache:
-                return "logbot placeholder text"
-            chunk = random.choice(self._cache)
-        if len(chunk) <= max_chars:
-            return chunk
-        start = random.randint(0, len(chunk) - max_chars)
-        return chunk[start:start + max_chars]
-
-    def sample_lines(self, n: int = 3, max_chars: int = 200) -> list:
-        text = self.sample(max_chars * n)
-        words = text.split()
-        if not words:
-            return []
-        lines = []
-        for _ in range(n):
-            k = random.randint(4, max(5, max_chars // 6))
-            lines.append(" ".join(random.choices(words, k=k)))
-        return lines
-
-
-class WindowManager:
+class NppWindow:
     def __init__(self, monitor: UserActivityMonitor):
         self.monitor = monitor
-        self._opened_by_bot: set = set()
-        self._lock = threading.Lock()
+        self.proc: Optional[subprocess.Popen] = None
+        self.window = None
+        self.target_path: Optional[Path] = None
 
-    def owned_pids(self) -> set:
-        with self._lock:
-            return set(self._opened_by_bot)
+    def open(self, file_path: Path) -> None:
+        npp = find_notepadpp()
+        log.info(f"launching Notepad++ for {file_path.name}")
+        self.proc = subprocess.Popen([npp, str(file_path)])
+        self.target_path = file_path
+        self.window = self._wait_for_window(file_path.name, timeout=CFG.np_launch_timeout)
+        self._ensure_not_minimized()
+        self._ensure_maximized()
 
-    def mark_opened(self, pid: int) -> None:
-        with self._lock:
-            self._opened_by_bot.add(pid)
-
-    def forget(self, pid: int) -> None:
-        with self._lock:
-            self._opened_by_bot.discard(pid)
-
-    def is_alive(self, pid: int) -> bool:
-        try:
-            p = psutil.Process(pid)
-            return p.is_running() and p.status() != psutil.STATUS_ZOMBIE
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            return False
-
-    def launch(self, exe: str, args: Optional[list] = None) -> subprocess.Popen:
-        SafetyGuard.assert_safe_exe(exe)
-        args = args or []
-        log.info(f"launching {exe} {args}")
-        proc = subprocess.Popen([exe, *args])
-        self.mark_opened(proc.pid)
-        return proc
-
-    def wait_for_window(self,
-                        title_re: str,
-                        timeout: float = None,
-                        process_id: Optional[int] = None):
-        timeout = timeout if timeout is not None else CFG.window_timeout
+    def _wait_for_window(self, title_hint: str, timeout: float):
         deadline = time.time() + timeout
+        pattern = r".*" + re.escape(title_hint) + r".*"
         while time.time() < deadline:
             if self.monitor.user_is_active():
-                time.sleep(CFG.poll_interval)
+                time.sleep(CFG.np_poll_interval)
                 continue
             try:
-                kwargs = {"title_re": title_re, "visible_only": True}
-                if process_id is not None:
-                    kwargs["process"] = process_id
-                wins = Desktop(backend="uia").windows(**kwargs)
+                wins = Desktop(backend="uia").windows(title_re=pattern, visible_only=True)
                 for w in wins:
                     try:
                         if w.is_visible() and w.is_enabled():
@@ -432,430 +370,273 @@ class WindowManager:
             except ElementNotFoundError:
                 pass
             except Exception as e:
-                log.debug(f"wait_for_window poll: {e}")
-            time.sleep(CFG.poll_interval)
-        raise TimeoutError(f"No visible window matching '{title_re}' within {timeout}s")
+                log.debug(f"npp poll: {e}")
+            time.sleep(CFG.np_poll_interval)
+        raise TimeoutError(f"Notepad++ window for '{title_hint}' not found within {timeout}s")
 
-    def activate(self, window) -> None:
-        title = ""
+    def _ensure_not_minimized(self) -> None:
+        if self.window is None:
+            return
         try:
-            title = window.window_text()
-        except Exception:
-            pass
-        SafetyGuard.assert_safe_window(title)
-        try:
-            if window.is_minimized():
-                window.restore()
-            window.set_focus()
-            log.info(f"activated: {title}")
+            if self.window.is_minimized():
+                log.info("notepad++ was minimized - restoring")
+                self.window.restore()
+                time.sleep(0.2)
         except Exception as e:
-            log.warning(f"activate failed for '{title}': {e}")
+            log.debug(f"restore failed: {e}")
 
-    def maximize(self, window) -> None:
+    def _ensure_maximized(self) -> None:
+        if self.window is None:
+            return
         try:
-            window.maximize()
+            if not self.window.is_maximized():
+                self.window.maximize()
+                time.sleep(0.2)
+        except Exception as e:
+            log.debug(f"maximize failed: {e}")
+
+    def focus(self) -> None:
+        if self.window is None:
+            return
+        try:
+            if self.window.is_minimized():
+                self.window.restore()
+                time.sleep(0.15)
+            if not self.window.is_maximized():
+                self.window.maximize()
+                time.sleep(0.15)
+            self.window.set_focus()
+            time.sleep(0.15)
+        except Exception as e:
+            log.debug(f"npp focus: {e}")
+
+    def is_alive(self) -> bool:
+        if self.window is None:
+            return False
+        try:
+            return bool(self.window.is_visible())
         except Exception:
-            with self.monitor.input_shield():
-                try:
-                    window.set_focus()
-                    pyautogui.hotkey("win", "up")
-                except Exception as e:
-                    log.debug(f"maximize fallback failed: {e}")
+            return False
+
+    def close(self) -> None:
+        try:
+            if self.window is not None:
+                self.window.close()
+        except Exception as e:
+            log.debug(f"npp close: {e}")
+        try:
+            if self.proc is not None:
+                deadline = time.time() + CFG.np_close_timeout
+                while time.time() < deadline:
+                    if self.proc.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                if self.proc.poll() is None:
+                    self.proc.terminate()
+                    try:
+                        self.proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        self.proc.kill()
+        except Exception as e:
+            log.debug(f"npp proc cleanup: {e}")
+        self.proc = None
+        self.window = None
 
 
-class Actions:
-    def __init__(self, monitor: UserActivityMonitor, wm: WindowManager):
+class Typer:
+    def __init__(self, monitor: UserActivityMonitor):
         self.monitor = monitor
-        self.wm = wm
+        self._last_save_time = 0.0
+        self._active_window = None
 
-    def _send(self, fn: Callable[[], Any], label: str) -> Any:
+    def bind_window(self, window) -> None:
+        self._active_window = window
+
+    def _guarded_send(self, fn: Callable[[], Any]) -> Any:
         with self.monitor.input_shield():
-            try:
-                return fn()
-            except Exception as e:
-                log.warning(f"{label} failed: {e}")
-                raise
+            return fn()
 
-    def _type_delay(self) -> float:
-        return random.uniform(CFG.typing_interval_min, CFG.typing_interval_max)
+    def _char_delay(self) -> float:
+        if random.random() < CFG.typing_delay_burst_chance:
+            return random.uniform(CFG.typing_delay_burst_min, CFG.typing_delay_burst_max)
+        return random.uniform(CFG.typing_delay_min, CFG.typing_delay_max)
 
-    def _maybe_hesitate(self, end_time: Optional[float] = None) -> None:
-        if random.random() < CFG.typing_hesitation_chance:
-            pause = random.uniform(CFG.typing_hesitation_min, CFG.typing_hesitation_max)
-            if end_time is None:
-                time.sleep(pause)
-            else:
-                sleep_responsive(pause, end_time, self.monitor)
-
-    def _maybe_micro_pause(self, end_time: Optional[float] = None) -> None:
-        if random.random() < CFG.micro_pause_chance:
-            pause = random.uniform(CFG.micro_pause_min, CFG.micro_pause_max)
-            if end_time is None:
-                time.sleep(pause)
-            else:
-                sleep_responsive(pause, end_time, self.monitor)
-
-    def smooth_move(self,
-                    target_x: int,
-                    target_y: int,
-                    duration: Optional[float] = None,
-                    end_time: Optional[float] = None) -> bool:
-        if duration is None:
-            duration = random.uniform(0.3, 1.5)
-        start_x, start_y = pyautogui.position()
-        ctrl_x = (start_x + target_x) / 2 + random.randint(-200, 200)
-        ctrl_y = (start_y + target_y) / 2 + random.randint(-200, 200)
-        steps = max(int(duration * 60), 10)
-        for i in range(steps + 1):
-            if end_time is not None and time.time() >= end_time:
-                return False
-            if self.monitor.user_is_active():
-                return False
-            t = i / steps
-            x = (1 - t) ** 2 * start_x + 2 * (1 - t) * t * ctrl_x + t ** 2 * target_x
-            y = (1 - t) ** 2 * start_y + 2 * (1 - t) * t * ctrl_y + t ** 2 * target_y
-            self._send(lambda px=int(x), py=int(y): pyautogui.moveTo(px, py), "moveTo")
-            time.sleep(duration / steps)
-        return True
-
-    def click_at(self, x: int, y: int) -> None:
-        self._send(lambda: pyautogui.click(x, y), f"click_at({x},{y})")
-
-    def click_control(self, control) -> None:
-        def _do():
-            control.wait("visible enabled ready", timeout=CFG.control_timeout)
-            control.click_input()
-        self._send(_do, "click_control")
-
-    def type_text(self, text: str, end_time: Optional[float] = None) -> None:
-        for ch in text:
-            if end_time is not None and time.time() >= end_time:
-                return
-            if self.monitor.user_is_active():
-                return
-            self._send(lambda c=ch: pyautogui.write(c, interval=0), f"write('{ch}')")
-            time.sleep(self._type_delay())
-            if ch == " ":
-                pause = random.uniform(CFG.typing_word_pause_min, CFG.typing_word_pause_max)
-                if end_time is None:
-                    time.sleep(pause)
-                else:
-                    sleep_responsive(pause, end_time, self.monitor)
-            if ch in ".,;:!?":
-                pause = random.uniform(0.15, 0.45)
-                if end_time is None:
-                    time.sleep(pause)
-                else:
-                    sleep_responsive(pause, end_time, self.monitor)
-            self._maybe_hesitate(end_time)
-
-    def type_into_control(self, control, text: str, end_time: Optional[float] = None) -> None:
-        control.wait("visible enabled ready", timeout=CFG.control_timeout)
-        control.set_focus()
-        buf = []
-
-        def _flush():
-            if buf:
-                self._send(
-                    lambda s="".join(buf): control.type_keys(s, with_spaces=True, with_newlines=False),
-                    "type_keys flush",
-                )
-                buf.clear()
+    def type_content(self, text: str, save_path: Path, is_html: bool,
+                     end_time: float) -> bool:
+        chars_since_save = 0
+        chars_since_break = 0
+        next_break_at = random.randint(
+            CFG.typing_break_chunk_size_min, CFG.typing_break_chunk_size_max
+        )
+        save_every = CFG.save_every_chars_html if is_html else CFG.save_every_chars_other
+        self._last_save_time = time.time()
 
         for ch in text:
-            if end_time is not None and time.time() >= end_time:
-                _flush()
-                return
+            if time.time() >= end_time:
+                self._save()
+                return False
+
             if self.monitor.user_is_active():
-                _flush()
-                return
+                log.info("typing paused - waiting for human to release control")
+                if not self.monitor.wait_until_user_idle(end_time):
+                    self._save()
+                    return False
+                self._refocus_editor()
 
             if ch == "\n":
-                _flush()
-                self._send(
-                    lambda: control.type_keys("{ENTER}", with_newlines=False),
-                    "type_keys ENTER",
-                )
-                pause = random.uniform(CFG.typing_line_pause_min, CFG.typing_line_pause_max)
-                if end_time is None:
-                    time.sleep(pause)
-                else:
-                    sleep_responsive(pause, end_time, self.monitor)
-                continue
+                self._guarded_send(lambda: pyautogui.press("enter"))
+                self._sleep(random.uniform(
+                    CFG.typing_newline_pause_min, CFG.typing_newline_pause_max
+                ), end_time)
+                if random.random() < CFG.typing_break_chance_per_line:
+                    if not self._take_typing_break(end_time):
+                        self._save()
+                        return False
+            elif ch == "\t":
+                self._guarded_send(lambda: pyautogui.press("tab"))
+                self._sleep(random.uniform(
+                    CFG.typing_indent_pause_min, CFG.typing_indent_pause_max
+                ), end_time)
+            else:
+                self._guarded_send(lambda c=ch: pyautogui.write(c, interval=0))
+                self._sleep(self._char_delay(), end_time)
 
-            buf.append(ch)
+            chars_since_save += 1
+            chars_since_break += 1
 
             if ch == " ":
-                _flush()
-                self._send(
-                    lambda: control.type_keys(" ", with_spaces=True, with_newlines=False),
-                    "type_keys space",
+                self._sleep(random.uniform(
+                    CFG.typing_space_pause_min, CFG.typing_space_pause_max
+                ), end_time)
+            elif ch in ".,;:!?{}()<>=":
+                self._sleep(random.uniform(
+                    CFG.typing_punct_pause_min, CFG.typing_punct_pause_max
+                ), end_time)
+
+            if random.random() < CFG.typing_hesitation_chance:
+                self._sleep(random.uniform(
+                    CFG.typing_hesitation_min, CFG.typing_hesitation_max
+                ), end_time)
+
+            now = time.time()
+            if chars_since_save >= save_every or (now - self._last_save_time) >= CFG.save_every_seconds:
+                self._save()
+                chars_since_save = 0
+                self._last_save_time = now
+
+            if chars_since_break >= next_break_at:
+                chars_since_break = 0
+                next_break_at = random.randint(
+                    CFG.typing_break_chunk_size_min, CFG.typing_break_chunk_size_max
                 )
-                pause = random.uniform(CFG.typing_word_pause_min, CFG.typing_word_pause_max)
-                if end_time is None:
-                    time.sleep(pause)
-                else:
-                    sleep_responsive(pause, end_time, self.monitor)
-                self._maybe_micro_pause(end_time)
-            elif ch in ".,;:!?":
-                _flush()
-                self._send(
-                    lambda c=ch: control.type_keys(c, with_spaces=True, with_newlines=False),
-                    f"type_keys '{ch}'",
-                )
-                pause = random.uniform(0.2, 0.55)
-                if end_time is None:
-                    time.sleep(pause)
-                else:
-                    sleep_responsive(pause, end_time, self.monitor)
-            else:
-                _flush()
-                self._send(
-                    lambda c=ch: control.type_keys(c, with_spaces=True, with_newlines=False),
-                    f"type_keys '{ch}'",
-                )
-                time.sleep(self._type_delay())
-                self._maybe_hesitate(end_time)
+                if random.random() < CFG.typing_break_chance_per_chunk:
+                    if not self._take_typing_break(end_time):
+                        self._save()
+                        return False
 
-        _flush()
-
-    def hotkey(self, *keys: str) -> None:
-        self._send(lambda: pyautogui.hotkey(*keys), f"hotkey{keys}")
-
-    def send_win_keys(self, seq: str) -> None:
-        self._send(lambda: uia_send_keys(seq), f"send_keys({seq})")
-
-    def scroll(self, clicks: int) -> None:
-        self._send(lambda: pyautogui.scroll(clicks), "scroll")
-
-    def jitter(self, count: Optional[int] = None,
-               end_time: Optional[float] = None) -> bool:
-        if count is None:
-            count = random.randint(5, 25)
-        for _ in range(count):
-            if end_time is not None and time.time() >= end_time:
-                return False
-            if self.monitor.user_is_active():
-                return False
-            dx = random.randint(-4, 4)
-            dy = random.randint(-4, 4)
-            self._send(
-                lambda a=dx, b=dy: pyautogui.moveRel(a, b, duration=0.02),
-                "moveRel",
-            )
+        self._save()
         return True
 
-    def hover_around(self, end_time: float) -> bool:
-        w, h = get_screen_size()
-        n_points = random.randint(
-            CFG.hover_break_min_points, CFG.hover_break_max_points
+    def _take_typing_break(self, end_time: float) -> bool:
+        duration = random.uniform(
+            CFG.typing_break_duration_min, CFG.typing_break_duration_max
         )
-        log.info(f"hover break: {n_points} random point(s)")
-        for _ in range(n_points):
-            if time.time() >= end_time:
-                return False
-            if not self.monitor.wait_until_user_idle(end_time):
-                return False
-            x, y = random_point(w, h)
-            if not self.smooth_move(x, y, end_time=end_time):
-                return False
-            dwell = random.uniform(
-                CFG.hover_break_dwell_min, CFG.hover_break_dwell_max
-            )
-            sleep_responsive(dwell, end_time, self.monitor)
-            if random.random() < CFG.click_empty_chance:
-                try:
-                    self.click_at(x, y)
-                except Exception:
-                    pass
-                sleep_responsive(random.uniform(0.3, 1.0), end_time, self.monitor)
-        idle_for = random.uniform(
-            CFG.hover_break_idle_min, CFG.hover_break_idle_max
+        log.info(f"typing break: hovering for {duration:.1f}s")
+        break_end = min(end_time, time.time() + duration)
+
+        points = random.randint(
+            CFG.typing_break_hover_min_points, CFG.typing_break_hover_max_points
         )
-        log.info(f"hover break: idle {idle_for:.1f}s")
-        sleep_responsive(idle_for, end_time, self.monitor)
-        return True
-
-    def open_save_dialog(self) -> None:
-        self.hotkey("ctrl", "s")
-
-    def open_save_as_dialog(self) -> None:
-        self.hotkey("ctrl", "shift", "s")
-
-    def open_file_menu(self) -> None:
-        self.hotkey("alt", "f")
-
-    def accept_dialog(self) -> None:
-        self.hotkey("enter")
-
-    def cancel_dialog(self) -> None:
-        self.hotkey("esc")
-
-    def open_task_manager(self) -> None:
-        self.hotkey("ctrl", "shift", "esc")
-
-    def close_active_window(self) -> None:
-        self.hotkey("alt", "f4")
-
-
-class ResourceManager:
-    def __init__(self, monitor: UserActivityMonitor, wm: WindowManager):
-        self.monitor = monitor
-        self.wm = wm
-        self.self_pid = os.getpid()
-        self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._last_check = 0.0
-        self._last_cpu = 0.0
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._loop, name="ResourceMgr", daemon=True)
-        self._thread.start()
-        log.info("resource manager started")
-
-    def stop(self) -> None:
-        self._stop.set()
-
-    def _loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                now = time.time()
-                if now - self._last_check >= CFG.resource_check_interval:
-                    self._last_check = now
-                    if not self.monitor.user_is_active():
-                        self._evaluate()
-            except Exception as e:
-                log.warning(f"resource loop error: {e}")
-            time.sleep(CFG.cpu_sample_interval)
-
-    def _evaluate(self) -> None:
-        try:
-            cpu = psutil.cpu_percent(interval=None)
-            vm = psutil.virtual_memory()
-            mem = vm.percent
-        except Exception as e:
-            log.debug(f"resource sample failed: {e}")
-            return
-
-        self._last_cpu = cpu
-        log.debug(f"resource sample cpu={cpu:.1f}% mem={mem:.1f}%")
-
-        if cpu >= CFG.cpu_high_watermark or mem >= CFG.memory_high_watermark:
-            log.warning(f"resource spike detected cpu={cpu:.1f}% mem={mem:.1f}%")
-            self._relieve_pressure()
-
-        self._enforce_min_apps()
-
-    def _relieve_pressure(self) -> None:
-        owned = self.wm.owned_pids()
-        if not owned:
-            return
-        procs = []
-        for pid in list(owned):
-            try:
-                p = psutil.Process(pid)
-                mem_mb = p.memory_info().rss / (1024 * 1024)
-                procs.append((mem_mb, pid, p.name()))
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                self.wm.forget(pid)
-        procs.sort(reverse=True)
-        target_mem = CFG.memory_low_watermark
-        for mem_mb, pid, name in procs:
-            try:
-                vm = psutil.virtual_memory()
-                if vm.percent <= target_mem:
-                    break
-            except Exception:
+        for _ in range(points):
+            if time.time() >= break_end:
                 break
-            self._safe_terminate(pid, name)
-
-    def _enforce_min_apps(self) -> None:
-        owned = self.wm.owned_pids()
-        if len(owned) <= CFG.max_sandboxed_apps:
-            return
-        survivors = list(owned)[: CFG.max_sandboxed_apps]
-        for pid in list(owned):
-            if pid in survivors:
-                continue
-            try:
-                p = psutil.Process(pid)
-                self._safe_terminate(pid, p.name())
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                self.wm.forget(pid)
-
-    def _safe_terminate(self, pid: int, name: str) -> None:
-        if CFG.protect_own_pid and pid == self.self_pid:
-            log.warning("refused to terminate self")
-            return
-        try:
-            p = psutil.Process(pid)
-            if not SafetyGuard.is_safe_exe(p.name()):
-                log.warning(f"refused to terminate non-whitelisted '{p.name()}'")
-                return
-            log.info(f"terminating sandboxed app pid={pid} name={name}")
-            p.terminate()
-            try:
-                p.wait(timeout=5)
-            except psutil.TimeoutExpired:
-                p.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-            log.debug(f"terminate {pid} skipped: {e}")
-        finally:
-            self.wm.forget(pid)
-
-
-class FreezeGuard:
-    def __init__(self, monitor: UserActivityMonitor, actions: Actions):
-        self.monitor = monitor
-        self.actions = actions
-        self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._last_tick = time.time()
-
-    def heartbeat(self) -> None:
-        self._last_tick = time.time()
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._loop, name="FreezeGuard", daemon=True)
-        self._thread.start()
-        log.info("freeze guard started")
-
-    def stop(self) -> None:
-        self._stop.set()
-
-    def _loop(self) -> None:
-        while not self._stop.is_set():
-            time.sleep(CFG.freeze_poll_interval)
             if self.monitor.user_is_active():
-                self._last_tick = time.time()
-                continue
-            stall = time.time() - self._last_tick
-            if stall >= CFG.freeze_detection_window:
-                log.warning(f"freeze suspected (no heartbeat for {stall:.1f}s)")
-                self._recover()
-                self._last_tick = time.time()
+                break
+            self._hover_once(break_end)
 
-    def _recover(self) -> None:
+        while time.time() < break_end:
+            if self.monitor.user_is_active():
+                if not self.monitor.wait_until_user_idle(end_time):
+                    return False
+                break
+            sleep_responsive(
+                min(0.5, break_end - time.time()), end_time, self.monitor
+            )
+
+        if time.time() >= end_time:
+            return False
+
+        self._refocus_editor()
+        return True
+
+    def _refocus_editor(self) -> None:
+        if self._active_window is None:
+            return
         try:
+            if self._active_window.is_minimized():
+                log.info("notepad++ minimized mid-session - restoring")
+                self._active_window.restore()
+                time.sleep(0.2)
+            if not self._active_window.is_maximized():
+                self._active_window.maximize()
+                time.sleep(0.2)
+            self._active_window.set_focus()
+            time.sleep(CFG.typing_break_return_settle)
             with self.monitor.input_shield():
-                pyautogui.hotkey("ctrl", "alt", "delete")
-                time.sleep(1.5)
-                pyautogui.press("esc")
-            log.info("freeze recovery sent ctrl+alt+del then esc")
+                pyautogui.click()
+                time.sleep(0.06)
+                pyautogui.hotkey("ctrl", "end")
+                time.sleep(0.05)
         except Exception as e:
-            log.error(f"freeze recovery failed: {e}")
+            log.debug(f"refocus failed: {e}")
+
+    def _save(self) -> None:
+        try:
+            self._guarded_send(lambda: pyautogui.hotkey("ctrl", "s"))
+            time.sleep(0.08)
+        except Exception as e:
+            log.debug(f"save failed: {e}")
+
+    def _sleep(self, seconds: float, end_time: float) -> None:
+        sleep_responsive(seconds, end_time, self.monitor)
+
+    def _hover_once(self, end_time: float) -> None:
+        w, h = pyautogui.size()
+        m = CFG.hover_margin
+        x = random.randint(m, max(m + 1, w - m))
+        y = random.randint(m, max(m + 1, h - m))
+        duration = random.uniform(
+            CFG.hover_move_duration_min, CFG.hover_move_duration_max
+        )
+        self._smooth_move(x, y, duration, end_time)
+        dwell = random.uniform(CFG.hover_dwell_min, CFG.hover_dwell_max)
+        sleep_responsive(dwell, end_time, self.monitor)
+
+    def _smooth_move(self, tx: int, ty: int, duration: float, end_time: float) -> None:
+        sx, sy = pyautogui.position()
+        cx = (sx + tx) / 2 + random.randint(-180, 180)
+        cy = (sy + ty) / 2 + random.randint(-180, 180)
+        steps = max(int(duration * 60), 10)
+        for i in range(steps + 1):
+            if time.time() >= end_time:
+                return
+            if self.monitor.user_is_active():
+                return
+            t = i / steps
+            x = (1 - t) ** 2 * sx + 2 * (1 - t) * t * cx + t ** 2 * tx
+            y = (1 - t) ** 2 * sy + 2 * (1 - t) * t * cy + t ** 2 * ty
+            with self.monitor.input_shield():
+                try:
+                    pyautogui.moveTo(int(x), int(y))
+                except Exception:
+                    return
+            time.sleep(duration / steps)
 
 
-class WorkflowEngine:
-    def __init__(self,
-                 monitor: UserActivityMonitor,
-                 wm: WindowManager,
-                 actions: Actions,
-                 freeze_guard: FreezeGuard):
+class Wanderer:
+    def __init__(self, monitor: UserActivityMonitor, typer: Typer):
         self.monitor = monitor
-        self.wm = wm
-        self.actions = actions
-        self.freeze_guard = freeze_guard
+        self.typer = typer
         self._stop = threading.Event()
 
     def stop(self) -> None:
@@ -864,425 +645,97 @@ class WorkflowEngine:
     def stopped(self) -> bool:
         return self._stop.is_set()
 
-    def run_step(self,
-                 name: str,
-                 fn: Callable[[], Any],
-                 verify: Optional[Callable[[], bool]] = None,
-                 retries: Optional[int] = None,
-                 timeout: Optional[float] = None) -> bool:
-        retries = retries if retries is not None else CFG.action_retries
-        timeout = timeout if timeout is not None else CFG.control_timeout
-        for attempt in range(1, retries + 1):
-            if self._stop.is_set():
-                return False
-            if self.monitor.user_is_active():
-                if not self.monitor.wait_until_user_idle(time.time() + 3600):
-                    return False
-            try:
-                self.freeze_guard.heartbeat()
-                log.info(f"step '{name}' attempt {attempt}/{retries}")
-                fn()
-                if verify is not None:
-                    ok = self._verify_with_timeout(verify, timeout)
-                    if not ok:
-                        raise RuntimeError(f"verify failed for '{name}'")
-                self.freeze_guard.heartbeat()
-                log.info(f"step '{name}' ok")
-                return True
-            except Exception as e:
-                log.warning(f"step '{name}' error: {e}")
-                time.sleep(CFG.action_retry_delay)
-        log.error(f"step '{name}' exhausted retries")
-        return False
-
-    def _verify_with_timeout(self, verify: Callable[[], bool], timeout: float) -> bool:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                if verify():
-                    return True
-            except Exception as e:
-                log.debug(f"verify poll: {e}")
-            time.sleep(CFG.poll_interval)
-        return False
-
-
-class Workflows:
-    def __init__(self,
-                 monitor: UserActivityMonitor,
-                 wm: WindowManager,
-                 actions: Actions,
-                 engine: WorkflowEngine):
-        self.monitor = monitor
-        self.wm = wm
-        self.actions = actions
-        self.engine = engine
-
-    def wander(self, duration_seconds: float) -> None:
-        w, h = get_screen_size()
-        end_time = time.time() + duration_seconds
-        log.info(f"wander starting for {duration_seconds:.0f}s")
-        while time.time() < end_time and not self.engine.stopped():
-            if not self.monitor.wait_until_user_idle(end_time):
+    def run(self, end_time: float) -> None:
+        log.info("wander session started - hovering only, no clicks")
+        while not self._stop.is_set():
+            if time.time() >= end_time:
                 break
             if self.monitor.user_is_active():
-                continue
-            action = random.choices(
-                list(CFG.wander_weights.keys()),
-                weights=list(CFG.wander_weights.values()),
-                k=1,
-            )[0]
-            try:
-                self.engine.freeze_guard.heartbeat()
-                if action == "move":
-                    x, y = random_point(w, h)
-                    self.actions.smooth_move(x, y, end_time=end_time)
-                elif action == "hover":
-                    x, y = random_point(w, h)
-                    if self.actions.smooth_move(x, y, end_time=end_time):
-                        sleep_responsive(
-                            random.uniform(0.5, 3.0), end_time, self.monitor
-                        )
-                elif action == "jitter":
-                    self.actions.jitter(end_time=end_time)
-                elif action == "scroll":
-                    x, y = random_point(w, h)
-                    if self.actions.smooth_move(x, y, end_time=end_time):
-                        self.actions.scroll(
-                            random.choice([-1, 1]) * random.randint(50, 300)
-                        )
-                elif action == "click_empty":
-                    x, y = random_point(w, h)
-                    if self.actions.smooth_move(x, y, end_time=end_time):
-                        sleep_responsive(
-                            random.uniform(0.2, 0.8), end_time, self.monitor
-                        )
-                        try:
-                            self.actions.click_at(x, y)
-                        except Exception:
-                            pass
-                elif action == "rest":
-                    sleep_responsive(
-                        random.uniform(0.5, 3.0), end_time, self.monitor
-                    )
-            except pyautogui.FailSafeException:
-                log.info("fail-safe triggered")
-                return
-
-
-class SessionRunner:
-    def __init__(self,
-                 monitor: UserActivityMonitor,
-                 wm: WindowManager,
-                 actions: Actions,
-                 engine: WorkflowEngine,
-                 workflows: Workflows,
-                 docs: DocLibrary):
-        self.monitor = monitor
-        self.wm = wm
-        self.actions = actions
-        self.engine = engine
-        self.workflows = workflows
-        self.docs = docs
-
-        self._recipes = {
-            "notepad": self._run_notepad,
-            "explorer": self._run_explorer,
-        }
-
-    def _available_recipes(self) -> list:
-        return list(self._recipes.keys())
-
-    def _maybe_rest(self, end_time: float) -> None:
-        if random.random() < CFG.rest_chance:
-            pause = random.uniform(CFG.rest_min, CFG.rest_max)
-            log.info(f"taking a rest for {pause:.1f}s")
-            sleep_responsive(pause, end_time, self.monitor)
-
-    def _maybe_hover_break(self, end_time: float) -> None:
-        if random.random() < CFG.hover_break_chance:
-            log.info("starting hover break")
-            self.actions.hover_around(end_time)
-
-    def run(self, duration_seconds: float, mode: str = "sessions") -> None:
-        end_time = time.time() + duration_seconds
-        log.info(f"session runner started in mode '{mode}'")
-
-        while time.time() < end_time and not self.engine.stopped():
-            if not self.monitor.wait_until_user_idle(end_time):
-                break
-            if self.monitor.user_is_active():
-                continue
-
-            self._maybe_hover_break(end_time)
-
-            if time.time() >= end_time or self.engine.stopped():
-                break
-
-            if mode == "notepad":
-                plan = ["notepad"]
-            elif mode == "explorer":
-                plan = ["explorer"]
-            elif mode == "sessions":
-                n = random.randint(CFG.session_min_apps, CFG.session_max_apps)
-                plan = random.sample(
-                    self._available_recipes(),
-                    k=min(n, len(self._recipes)),
-                )
-            else:
-                log.warning(f"unknown mode '{mode}' - defaulting to 'sessions'")
-                n = random.randint(CFG.session_min_apps, CFG.session_max_apps)
-                plan = random.sample(
-                    self._available_recipes(),
-                    k=min(n, len(self._recipes)),
-                )
-
-            log.info(f"session plan: {plan}")
-
-            for app_name in plan:
-                if time.time() >= end_time or self.engine.stopped():
-                    break
                 if not self.monitor.wait_until_user_idle(end_time):
                     break
-                try:
-                    self._recipes[app_name](end_time)
-                except Exception as e:
-                    log.warning(f"recipe '{app_name}' raised: {e}")
-                self._maybe_rest(end_time)
-
-            sleep_responsive(random.uniform(2.0, 6.0), end_time, self.monitor)
-
-        log.info("session runner finished")
-
-    def _pick_duration(self) -> float:
-        return random.uniform(CFG.app_duration_min, CFG.app_duration_max)
-
-    def _run_notepad(self, end_time: float) -> None:
-        app_deadline = min(end_time, time.time() + self._pick_duration())
-        log.info("entering notepad recipe")
-
-        proc = None
-        try:
-            proc = self.wm.launch("notepad.exe")
-            try:
-                win = self.wm.wait_for_window(r".*Notepad.*", process_id=proc.pid)
-            except TimeoutError as e:
-                log.error(f"notepad did not open: {e}")
-                return
-
-            self.wm.activate(win)
-            self.wm.maximize(win)
-
-            edit = None
-            try:
-                edit = win.child_window(control_type="Edit")
-                edit.wait("visible enabled ready", timeout=CFG.control_timeout)
-            except Exception as e:
-                log.warning(f"edit control not resolved: {e}")
-
-            n_actions = random.randint(
-                CFG.actions_per_app_min, CFG.actions_per_app_max
-            )
-            log.info(f"notepad: performing {n_actions} action block(s)")
-
-            for block in range(n_actions):
-                if time.time() >= app_deadline or self.engine.stopped():
-                    break
-                if not self.monitor.wait_until_user_idle(app_deadline):
-                    break
-                if not self.wm.is_alive(proc.pid):
-                    log.info("notepad was closed by user - ending recipe cleanly")
-                    self.wm.forget(proc.pid)
-                    return
-
-                lines = self.docs.sample_lines(n=random.randint(2, 5))
-                if not lines:
-                    lines = ["logbot placeholder"]
-
-                for line in lines:
-                    if time.time() >= app_deadline or self.engine.stopped():
-                        break
-                    if not self.wm.is_alive(proc.pid):
-                        log.info("notepad was closed by user mid-typing - stopping recipe")
-                        self.wm.forget(proc.pid)
-                        return
-                    if self.monitor.user_is_active():
-                        self.monitor.wait_until_user_idle(app_deadline)
-                        continue
-
-                    text = line + "\n"
-                    if edit is not None:
-                        ok = self.engine.run_step(
-                            f"notepad type block {block+1}",
-                            lambda t=text: self.actions.type_into_control(edit, t, app_deadline),
-                        )
-                        if not ok and not self.wm.is_alive(proc.pid):
-                            self.wm.forget(proc.pid)
-                            return
-                    else:
-                        ok = self.engine.run_step(
-                            f"notepad type block {block+1}",
-                            lambda t=text: self.actions.type_text(t, app_deadline),
-                        )
-                        if not ok and not self.wm.is_alive(proc.pid):
-                            self.wm.forget(proc.pid)
-                            return
-
-                    sleep_responsive(
-                        random.uniform(CFG.typing_line_pause_min, CFG.typing_line_pause_max),
-                        app_deadline,
-                        self.monitor,
-                    )
-
-                sleep_responsive(random.uniform(1.0, 3.0), app_deadline, self.monitor)
-
-            if not self.engine.stopped() and time.time() < app_deadline:
-                if self.wm.is_alive(proc.pid):
-                    out = SafetyGuard.resolve_path(
-                        CFG.logbot_dir / f"note_{int(time.time())}.txt"
-                    )
-
-                    def _save():
-                        self.actions.open_save_as_dialog()
-                        time.sleep(0.8)
-                        self.actions.type_text(str(out))
-                        time.sleep(0.3)
-                        self.actions.accept_dialog()
-
-                    self.engine.run_step(
-                        "notepad save as",
-                        _save,
-                        verify=lambda: out.exists(),
-                        timeout=10,
-                    )
-                else:
-                    log.info("notepad closed by user before save - skipping save")
-
-        finally:
-            if proc is not None:
-                self._maybe_close(proc.pid, "notepad.exe")
-
-    def _run_explorer(self, end_time: float) -> None:
-        app_deadline = min(end_time, time.time() + self._pick_duration())
-        log.info("entering explorer recipe")
-
-        target = CFG.logbot_dir
-        target.mkdir(parents=True, exist_ok=True)
-
-        proc = None
-        try:
-            proc = self.wm.launch("explorer.exe", [str(target)])
-            try:
-                win = self.wm.wait_for_window(
-                    r".*logbot.*", process_id=proc.pid, timeout=10
-                )
-            except TimeoutError:
-                try:
-                    win = self.wm.wait_for_window(r".*logbot.*", timeout=10)
-                except TimeoutError as e:
-                    log.error(f"explorer window not found: {e}")
-                    return
-
-            self.wm.activate(win)
-            self.wm.maximize(win)
-
-            n_actions = random.randint(
-                CFG.actions_per_app_min, CFG.actions_per_app_max
-            )
-            log.info(f"explorer: performing {n_actions} action block(s)")
-
-            for block in range(n_actions):
-                if time.time() >= app_deadline or self.engine.stopped():
-                    break
-                if not self.monitor.wait_until_user_idle(app_deadline):
-                    break
-                if not self.wm.is_alive(proc.pid):
-                    log.info("explorer was closed by user - ending recipe cleanly")
-                    self.wm.forget(proc.pid)
+                continue
+            points = random.randint(CFG.hover_min_points, CFG.hover_max_points)
+            for _ in range(points):
+                if self._stop.is_set() or time.time() >= end_time:
                     return
                 if self.monitor.user_is_active():
-                    continue
+                    break
+                self.typer._hover_once(end_time)
+            idle = random.uniform(CFG.hover_idle_min, CFG.hover_idle_max)
+            sleep_responsive(idle, end_time, self.monitor)
 
-                action = random.choice(["browse", "new_folder", "open_file", "rename", "back"])
 
-                try:
-                    if action == "browse":
-                        self.actions.jitter(end_time=app_deadline)
-                        self.actions.scroll(random.choice([-1, 1]) * random.randint(80, 400))
-                        sleep_responsive(random.uniform(0.8, 2.2), app_deadline, self.monitor)
+class FlaskServer:
+    def __init__(self, root: Path, entry: str, host: str, port: int):
+        self.root = root
+        self.entry = entry
+        self.host = host
+        self.port = port
+        self._thread: Optional[threading.Thread] = None
+        self._app: Optional[Flask] = None
 
-                    elif action == "new_folder":
-                        name = f"folder_{random.randint(1000, 9999)}"
-                        self.actions.hotkey("ctrl", "shift", "n")
-                        sleep_responsive(random.uniform(0.4, 1.0), app_deadline, self.monitor)
-                        self.actions.type_text(name, app_deadline)
-                        sleep_responsive(random.uniform(0.3, 0.8), app_deadline, self.monitor)
-                        self.actions.accept_dialog()
-                        sleep_responsive(random.uniform(0.5, 1.2), app_deadline, self.monitor)
+    def start(self) -> None:
+        self._app = self._build_app()
+        self._thread = threading.Thread(target=self._serve, name="FlaskSrv", daemon=True)
+        self._thread.start()
 
-                    elif action == "open_file":
-                        self.actions.hotkey("alt", "up")
-                        sleep_responsive(random.uniform(0.5, 1.2), app_deadline, self.monitor)
-                        self.actions.hotkey("alt", "down")
-                        sleep_responsive(random.uniform(0.5, 1.2), app_deadline, self.monitor)
-                        self.actions.accept_dialog()
-                        sleep_responsive(random.uniform(0.5, 1.5), app_deadline, self.monitor)
+    def _build_app(self) -> Flask:
+        root = self.root
+        entry = self.entry
+        app = Flask("webdevbot_preview", static_folder=None)
 
-                    elif action == "rename":
-                        self.actions.jitter(end_time=app_deadline)
-                        sleep_responsive(random.uniform(0.4, 1.0), app_deadline, self.monitor)
-                        self.actions.hotkey("f2")
-                        sleep_responsive(random.uniform(0.3, 0.8), app_deadline, self.monitor)
-                        self.actions.hotkey("esc")
+        @app.route("/")
+        def index():
+            target = root / entry
+            if not target.exists():
+                return ("<html><body style='font-family:system-ui;padding:2rem;"
+                        "background:#14161a;color:#e6e8ec'>"
+                        "<h2>Preview not ready</h2>"
+                        "<p>The bot is still typing the entry file.</p>"
+                        "</body></html>"), 200
+            return send_from_directory(str(root), entry)
 
-                    elif action == "back":
-                        self.actions.hotkey("alt", "left")
-                        sleep_responsive(random.uniform(0.5, 1.2), app_deadline, self.monitor)
-                        self.actions.hotkey("alt", "right")
-                        sleep_responsive(random.uniform(0.5, 1.2), app_deadline, self.monitor)
+        @app.route("/<path:filename>")
+        def any_file(filename):
+            target = root / filename
+            if not target.exists() or target.is_dir():
+                abort(404)
+            return send_from_directory(str(root), filename)
 
-                except Exception as e:
-                    log.debug(f"explorer action '{action}' failed: {e}")
+        @app.after_request
+        def no_cache(resp):
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["Expires"] = "0"
+            return resp
 
-        finally:
-            if proc is not None:
-                self._maybe_close(proc.pid, "explorer.exe")
+        return app
 
-    def _maybe_close(self, pid: int, exe_name: str) -> None:
-        if pid not in self.wm.owned_pids():
-            return
-        if pid == os.getpid():
-            return
-        if not self.wm.is_alive(pid):
-            log.info(f"{exe_name} pid={pid} already gone - nothing to close")
-            self.wm.forget(pid)
-            return
+    def _serve(self) -> None:
         try:
-            p = psutil.Process(pid)
-            if not SafetyGuard.is_safe_exe(p.name()):
-                self.wm.forget(pid)
-                return
-            log.info(f"closing {exe_name} pid={pid}")
-            p.terminate()
-            try:
-                p.wait(timeout=5)
-            except psutil.TimeoutExpired:
-                p.kill()
+            log.info(f"flask server on http://{self.host}:{self.port}/")
+            self._app.run(
+                host=self.host,
+                port=self.port,
+                debug=False,
+                use_reloader=False,
+                threaded=True,
+            )
         except Exception as e:
-            log.debug(f"close {pid} skipped: {e}")
-        finally:
-            self.wm.forget(pid)
+            log.error(f"flask server stopped: {e}")
 
 
 class BotController:
     def __init__(self):
         self._thread: Optional[threading.Thread] = None
-        self._stop_event = threading.Event()
         self._monitor: Optional[UserActivityMonitor] = None
-        self._engine: Optional[WorkflowEngine] = None
-        self._resources: Optional[ResourceManager] = None
-        self._freeze_guard: Optional[FreezeGuard] = None
+        self._wanderer: Optional[Wanderer] = None
+        self._flask: Optional[FlaskServer] = None
+        self._tree: Optional[ProjectTree] = None
+        self._duration_seconds: float = 0.0
+        self._stop_event = threading.Event()
         self._state = "idle"
+        self._current_npp: Optional[NppWindow] = None
 
     def state(self) -> str:
         return self._state
@@ -1290,96 +743,560 @@ class BotController:
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, duration_hours: float, mode: str) -> None:
+    def start(self, tree: ProjectTree, duration_hours: float) -> None:
         if self.is_running():
             return
+        self._tree = tree
+        self._duration_seconds = max(0.0, duration_hours * 3600.0)
         self._stop_event.clear()
         self._state = "starting"
         self._thread = threading.Thread(
-            target=self._run,
-            args=(duration_hours, mode),
-            name="BotWorker",
-            daemon=True,
+            target=self._run, name="BotWorker", daemon=True
         )
         self._thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._engine is not None:
-            self._engine.stop()
+        if self._wanderer is not None:
+            self._wanderer.stop()
         self._state = "stopping"
 
-    def _run(self, duration_hours: float, mode: str) -> None:
+    def _run(self) -> None:
         try:
             self._state = "running"
-            docs = DocLibrary(CFG.docs_dir, CFG.docs_glob)
-            docs.refresh()
+            self._scaffold_project()
+
+            self._flask = FlaskServer(
+                PROJECT_ROOT, self._tree.entry, CFG.flask_host, CFG.flask_port
+            )
+            self._flask.start()
+            time.sleep(0.4)
+            try:
+                webbrowser.open(f"http://{CFG.flask_host}:{CFG.flask_port}/")
+            except Exception:
+                pass
 
             self._monitor = UserActivityMonitor()
-            wm = WindowManager(self._monitor)
-            actions = Actions(self._monitor, wm)
-            self._freeze_guard = FreezeGuard(self._monitor, actions)
-            self._engine = WorkflowEngine(self._monitor, wm, actions, self._freeze_guard)
-            self._resources = ResourceManager(self._monitor, wm)
-            workflows = Workflows(self._monitor, wm, actions, self._engine)
-            runner = SessionRunner(
-                self._monitor, wm, actions, self._engine, workflows, docs
-            )
-
             self._monitor.start()
-            self._freeze_guard.start()
-            self._resources.start()
 
-            duration_seconds = duration_hours * 3600
-            end_time = time.time() + duration_seconds
+            typer = Typer(self._monitor)
+            self._wanderer = Wanderer(self._monitor, typer)
 
             time.sleep(CFG.startup_grace)
             self._monitor.arm()
 
+            end_time = (time.time() + self._duration_seconds
+                        if self._duration_seconds > 0 else float("inf"))
+
             log.info(f"waiting for {CFG.idle_threshold:.1f}s idle before starting")
-            while self._monitor.user_is_active():
-                if time.time() >= end_time or self._stop_event.is_set():
-                    log.info("aborted before start")
-                    return
-                time.sleep(CFG.input_poll_interval)
-            log.info("idle confirmed - starting")
+            if not self._monitor.wait_until_user_idle(end_time):
+                log.info("session ended before typing started")
+                return
+            log.info("human idle - starting typing")
+
+            for path, content in self._tree.ordered_writes():
+                if self._stop_event.is_set() or time.time() >= end_time:
+                    break
+                self._type_file(path, content, typer, end_time)
 
             if self._stop_event.is_set():
                 return
 
-            if mode == "wander":
-                workflows.wander(duration_seconds)
+            remaining = end_time - time.time()
+            if remaining > 5:
+                log.info(f"typing complete - entering hover-only wander "
+                         f"for remaining {remaining / 60:.1f} min")
+                self._state = "wandering"
+                self._wanderer.run(end_time=end_time)
             else:
-                runner.run(duration_seconds, mode=mode)
+                log.info("typing complete - no time remaining for wander")
 
-        except SafetyViolation as e:
-            log.error(f"safety violation: {e}")
         except Exception as e:
             log.exception(f"fatal: {e}")
         finally:
             try:
-                if self._engine is not None:
-                    self._engine.stop()
-                if self._resources is not None:
-                    self._resources.stop()
-                if self._freeze_guard is not None:
-                    self._freeze_guard.stop()
                 if self._monitor is not None:
                     self._monitor.stop()
             except Exception:
                 pass
             self._state = "idle"
-            log.info("logbot stopped")
+            log.info("bot stopped")
+
+    def _scaffold_project(self) -> None:
+        PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
+        for folder in sorted(self._tree.folders):
+            (PROJECT_ROOT / folder).mkdir(parents=True, exist_ok=True)
+        for path, _ in self._tree.ordered_writes():
+            target = PROJECT_ROOT / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("", encoding="utf-8")
+        log.info(f"scaffolded {len(self._tree.folders)} folder(s) and "
+                 f"{len(self._tree.files)} file(s) under {PROJECT_ROOT}")
+
+    def _type_file(self, rel_path: str, content: str, typer: Typer,
+                   end_time: float) -> None:
+        if self._stop_event.is_set() or time.time() >= end_time:
+            return
+        target = PROJECT_ROOT / rel_path
+        npp = NppWindow(self._monitor)
+        self._current_npp = npp
+        try:
+            npp.open(target)
+            npp.focus()
+            time.sleep(0.35)
+            self._select_all_and_clear()
+            typer.bind_window(npp.window)
+            is_html = target.suffix.lower() in (".html", ".htm")
+            log.info(f"typing {rel_path} ({len(content)} chars)")
+            typer.type_content(content, target, is_html, end_time)
+            log.info(f"finished typing {rel_path}")
+        except Exception as e:
+            log.error(f"typing {rel_path} failed: {e}")
+        finally:
+            typer.bind_window(None)
+            self._current_npp = None
+            npp.close()
+            time.sleep(0.25)
+
+    def _select_all_and_clear(self) -> None:
+        try:
+            with self._monitor.input_shield():
+                pyautogui.hotkey("ctrl", "a")
+                time.sleep(0.06)
+                pyautogui.press("delete")
+                time.sleep(0.08)
+        except Exception as e:
+            log.debug(f"pre-clear failed: {e}")
+
+    def enforce_window_state(self) -> None:
+        npp = self._current_npp
+        if npp is None or npp.window is None:
+            return
+        try:
+            if npp.window.is_minimized():
+                log.info("notepad++ minimized detected - restoring to maximized")
+                npp.window.restore()
+                time.sleep(0.15)
+            if not npp.window.is_maximized():
+                npp.window.maximize()
+                time.sleep(0.15)
+        except Exception as e:
+            log.debug(f"window state enforcement failed: {e}")
 
 
-class LogbotApp(tk.Tk):
+class Palette:
+    bg = "#14161a"
+    surface = "#1c1f25"
+    surface_hi = "#232730"
+    surface_hi2 = "#2a2f3a"
+    border = "#2b3038"
+    border_hi = "#3a4050"
+    text = "#e6e8ec"
+    text_dim = "#8b909a"
+    text_muted = "#5f6672"
+    accent = "#7c9cff"
+    accent_hi = "#9bb2ff"
+    accent_dim = "#4a5f9e"
+    success = "#5ec07f"
+    warn = "#e5b757"
+    danger = "#e06060"
+    danger_hi = "#ef7373"
+    code_bg = "#0f1115"
+    code_fg = "#dde1e8"
+
+
+def _rounded_rect(canvas: tk.Canvas, x1, y1, x2, y2, r, **kwargs):
+    pts = [
+        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+        x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+        x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+    ]
+    return canvas.create_polygon(pts, smooth=True, **kwargs)
+
+
+class RoundedCard(tk.Frame):
+    def __init__(self, master, padding=16, radius=16,
+                 bg=None, border=None, **kwargs):
+        super().__init__(master, bg=master["bg"], **kwargs)
+        bg = bg or Palette.surface
+        border = border or Palette.border
+        self._radius = radius
+        self._bg = bg
+        self._border = border
+        self._padding = padding
+
+        self.canvas = tk.Canvas(
+            self, bg=master["bg"], highlightthickness=0, bd=0
+        )
+        self.canvas.pack(fill="both", expand=True)
+
+        self.inner = tk.Frame(self.canvas, bg=bg)
+        self._win_id = self.canvas.create_window(
+            padding, padding, anchor="nw", window=self.inner
+        )
+
+        self.canvas.bind("<Configure>", self._on_resize)
+
+    def _on_resize(self, event):
+        self.canvas.delete("card_bg")
+        _rounded_rect(
+            self.canvas, 1, 1, event.width - 1, event.height - 1,
+            self._radius, fill=self._bg, outline=self._border, width=1,
+            tags="card_bg",
+        )
+        self.canvas.tag_lower("card_bg")
+        self.canvas.itemconfigure(
+            self._win_id,
+            width=max(event.width - 2 * self._padding, 1),
+            height=max(event.height - 2 * self._padding, 1),
+        )
+
+
+class StyledButton(tk.Label):
+    def __init__(self, master, text, command, variant="default",
+                 padx=16, pady=8, font=("Segoe UI Semibold", 10)):
+        palettes = {
+            "default": (Palette.surface_hi, Palette.border_hi, Palette.text,
+                        Palette.surface_hi2, Palette.text),
+            "accent": (Palette.accent, Palette.accent, "#0e1014",
+                       Palette.accent_hi, "#0e1014"),
+            "danger": (Palette.danger, Palette.danger, "#ffffff",
+                       Palette.danger_hi, "#ffffff"),
+            "ghost": (Palette.surface, Palette.border, Palette.text_dim,
+                      Palette.surface_hi, Palette.text),
+        }
+        bg, border, fg, hover_bg, hover_fg = palettes[variant]
+        super().__init__(
+            master, text=text, bg=bg, fg=fg,
+            padx=padx, pady=pady, font=font, cursor="hand2",
+            bd=0, highlightthickness=1,
+            highlightbackground=border, highlightcolor=border,
+        )
+        self._hover_bg = hover_bg
+        self._hover_fg = hover_fg
+        self._bg = bg
+        self._fg = fg
+        self._cmd = command
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", lambda _e: self._cmd())
+
+    def _on_enter(self, _e):
+        self.configure(bg=self._hover_bg, fg=self._hover_fg)
+
+    def _on_leave(self, _e):
+        self.configure(bg=self._bg, fg=self._fg)
+
+
+class ProjectPanel(tk.Frame):
+    def __init__(self, master, tree: ProjectTree,
+                 on_select: Callable[[str], None],
+                 on_change: Callable[[], None]):
+        super().__init__(master, bg=Palette.surface)
+        self.tree_data = tree
+        self.on_select = on_select
+        self.on_change = on_change
+        self.current: Optional[str] = None
+        self._build()
+        self.refresh()
+
+    def _build(self):
+        header = tk.Frame(self, bg=Palette.surface)
+        header.pack(fill="x", padx=4, pady=(2, 10))
+        tk.Label(header, text="Project Structure",
+                 bg=Palette.surface, fg=Palette.text,
+                 font=("Segoe UI Semibold", 11)).pack(side="left")
+
+        body = tk.Frame(self, bg=Palette.surface)
+        body.pack(fill="both", expand=True)
+
+        style = ttk.Style()
+        style.configure(
+            "Project.Treeview",
+            background=Palette.surface,
+            fieldbackground=Palette.surface,
+            foreground=Palette.text,
+            bordercolor=Palette.surface,
+            lightcolor=Palette.surface,
+            darkcolor=Palette.surface,
+            rowheight=26,
+            font=("Segoe UI", 10),
+        )
+        style.map(
+            "Project.Treeview",
+            background=[("selected", Palette.accent_dim)],
+            foreground=[("selected", "#ffffff")],
+        )
+
+        self.treeview = ttk.Treeview(
+            body, show="tree", style="Project.Treeview", selectmode="browse",
+        )
+        self.treeview.pack(side="left", fill="both", expand=True)
+
+        sb = ttk.Scrollbar(body, orient="vertical", command=self.treeview.yview)
+        sb.pack(side="right", fill="y")
+        self.treeview.configure(yscrollcommand=sb.set)
+
+        self.treeview.bind("<<TreeviewSelect>>", self._on_select)
+        self.treeview.bind("<Button-3>", self._on_right_click)
+
+        actions = tk.Frame(self, bg=Palette.surface)
+        actions.pack(fill="x", pady=(10, 0))
+        StyledButton(actions, "+ File", self._new_file,
+                     variant="ghost", padx=10, pady=6).pack(side="left")
+        StyledButton(actions, "+ Folder", self._new_folder,
+                     variant="ghost", padx=10, pady=6).pack(side="left", padx=(6, 0))
+        StyledButton(actions, "Remove", self._remove_selected,
+                     variant="ghost", padx=10, pady=6).pack(side="left", padx=(6, 0))
+
+    def _on_select(self, _event):
+        sel = self.treeview.selection()
+        if not sel:
+            return
+        item = sel[0]
+        values = self.treeview.item(item, "values")
+        if not values:
+            return
+        kind, rel = values[0], values[1]
+        if kind == "file":
+            self.current = rel
+            self.on_select(rel)
+        else:
+            self.current = None
+
+    def _on_right_click(self, event):
+        item = self.treeview.identify_row(event.y)
+        if not item:
+            return
+        self.treeview.selection_set(item)
+        values = self.treeview.item(item, "values")
+        if not values:
+            return
+        kind, rel = values[0], values[1]
+        menu = tk.Menu(self, tearoff=0,
+                       bg=Palette.surface_hi, fg=Palette.text,
+                       activebackground=Palette.accent_dim,
+                       activeforeground="#ffffff", bd=0)
+        if kind == "file":
+            menu.add_command(label="Set as entry file",
+                             command=lambda r=rel: self._set_entry(r))
+        menu.add_command(label="Remove",
+                         command=self._remove_selected)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _new_file(self):
+        parent = ""
+        sel = self.treeview.selection()
+        if sel:
+            values = self.treeview.item(sel[0], "values")
+            if values:
+                kind, rel = values[0], values[1]
+                parent = rel if kind == "folder" else "/".join(rel.split("/")[:-1])
+        name = simpledialog.askstring(
+            "New file", "Path relative to project root (e.g. index.html or js/app.js):",
+            initialvalue=(parent + "/" if parent else "") + "new.html",
+            parent=self,
+        )
+        if not name:
+            return
+        name = name.strip()
+        try:
+            self.tree_data.add_file(name, "")
+        except ValueError as e:
+            messagebox.showerror("Unsupported", str(e))
+            return
+        self.refresh()
+        self._select_path(name)
+        self.on_change()
+
+    def _new_folder(self):
+        parent = ""
+        sel = self.treeview.selection()
+        if sel:
+            values = self.treeview.item(sel[0], "values")
+            if values:
+                kind, rel = values[0], values[1]
+                parent = rel if kind == "folder" else "/".join(rel.split("/")[:-1])
+        name = simpledialog.askstring(
+            "New folder", "Folder path relative to project root:",
+            initialvalue=(parent + "/" if parent else "") + "assets",
+            parent=self,
+        )
+        if not name:
+            return
+        self.tree_data.add_folder(name)
+        self.refresh()
+        self.on_change()
+
+    def _remove_selected(self):
+        sel = self.treeview.selection()
+        if not sel:
+            return
+        values = self.treeview.item(sel[0], "values")
+        if not values:
+            return
+        kind, rel = values[0], values[1]
+        if not messagebox.askyesno("Remove", f"Remove {rel}?"):
+            return
+        self.tree_data.remove(rel)
+        if self.current == rel:
+            self.current = None
+            self.on_select("")
+        self.refresh()
+        self.on_change()
+
+    def _set_entry(self, rel: str):
+        self.tree_data.entry = rel
+        log.info(f"entry set to {rel}")
+        self.refresh()
+        self.on_change()
+
+    def _select_path(self, path: str):
+        for item in self.treeview.get_children(""):
+            if self._walk_select(item, path):
+                return
+
+    def _walk_select(self, item, target) -> bool:
+        values = self.treeview.item(item, "values")
+        if values and values[1] == target:
+            self.treeview.selection_set(item)
+            self.treeview.see(item)
+            return True
+        for child in self.treeview.get_children(item):
+            if self._walk_select(child, target):
+                return True
+        return False
+
+    def refresh(self):
+        open_state = {}
+        for item in self.treeview.get_children(""):
+            open_state[item] = self.treeview.item(item, "open")
+        self.treeview.delete(*self.treeview.get_children(""))
+
+        root_nodes = {}
+
+        def ensure(folder):
+            if folder in root_nodes:
+                return root_nodes[folder]
+            parent = "/".join(folder.split("/")[:-1]) if "/" in folder else ""
+            name = folder.split("/")[-1]
+            parent_node = ensure(parent) if parent else ""
+            node = self.treeview.insert(
+                parent_node, "end", text="  " + name,
+                values=("folder", folder), open=True,
+            )
+            root_nodes[folder] = node
+            return node
+
+        for folder in sorted(self.tree_data.folders):
+            ensure(folder)
+
+        for path in sorted(self.tree_data.files.keys()):
+            parent = "/".join(path.split("/")[:-1]) if "/" in path else ""
+            parent_node = ensure(parent) if parent else ""
+            name = path.split("/")[-1]
+            marker = " *" if path == self.tree_data.entry else ""
+            self.treeview.insert(
+                parent_node, "end", text="  " + name + marker,
+                values=("file", path),
+            )
+
+
+class EditorPanel(tk.Frame):
+    def __init__(self, master, tree: ProjectTree,
+                 on_change: Callable[[str, str], None]):
+        super().__init__(master, bg=Palette.surface)
+        self.tree_data = tree
+        self.on_change = on_change
+        self.current: Optional[str] = None
+        self._build()
+
+    def _build(self):
+        header = tk.Frame(self, bg=Palette.surface)
+        header.pack(fill="x", padx=4, pady=(2, 10))
+
+        self._title_var = tk.StringVar(value="No file selected")
+        tk.Label(header, textvariable=self._title_var,
+                 bg=Palette.surface, fg=Palette.text,
+                 font=("Segoe UI Semibold", 11)).pack(side="left")
+
+        self._entry_var = tk.StringVar(value="")
+        tk.Label(header, textvariable=self._entry_var,
+                 bg=Palette.surface, fg=Palette.accent,
+                 font=("Segoe UI Semibold", 10)).pack(side="right")
+
+        wrap = tk.Frame(self, bg=Palette.code_bg)
+        wrap.pack(fill="both", expand=True)
+
+        self.text = tk.Text(
+            wrap, wrap="none",
+            bg=Palette.code_bg, fg=Palette.code_fg,
+            insertbackground=Palette.accent,
+            selectbackground=Palette.accent_dim, selectforeground="#ffffff",
+            font=("Cascadia Code", 10), relief="flat", bd=0,
+            padx=14, pady=12, undo=True,
+        )
+        self.text.pack(side="left", fill="both", expand=True)
+
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.text.yview)
+        sb.pack(side="right", fill="y")
+        self.text.configure(yscrollcommand=sb.set)
+
+        self.text.bind("<<Modified>>", self._on_modified)
+
+    def _on_modified(self, _event):
+        if not self.text.edit_modified():
+            return
+        self.text.edit_modified(False)
+        if self.current is None:
+            return
+        self.tree_data.files[self.current] = self.text.get("1.0", "end-1c")
+        self.on_change(self.current, self.tree_data.files[self.current])
+
+    def load(self, path: str) -> None:
+        if path == "":
+            self.current = None
+            self._title_var.set("No file selected")
+            self._entry_var.set("")
+            self.text.configure(state="normal")
+            self.text.delete("1.0", "end")
+            return
+        self.current = path
+        self._title_var.set(path)
+        if path == self.tree_data.entry:
+            self._entry_var.set("ENTRY")
+        else:
+            self._entry_var.set("")
+        content = self.tree_data.files.get(path, "")
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", content)
+        self.text.edit_modified(False)
+
+    def refresh_entry_badge(self):
+        if self.current is None:
+            return
+        if self.current == self.tree_data.entry:
+            self._entry_var.set("ENTRY")
+        else:
+            self._entry_var.set("")
+
+
+class WebDevBotApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        self.title("WebDevBot")
+        self.geometry("1240x780")
+        self.minsize(1040, 640)
+        self.configure(bg=Palette.bg)
 
-        self.title("LogBot - Human-Supervised Desktop Automation")
-        self.geometry("980x680")
-        self.minsize(820, 560)
-        self.configure(bg="#1e1f22")
+        self._tree_data = ProjectTree()
+        self._tree_data.add_file("index.html", "")
+        self._tree_data.add_file("styles/main.css", "")
+        self._tree_data.add_file("scripts/app.js", "")
 
         self._log_queue: "queue.Queue[str]" = queue.Queue()
         self._ui_log_handler = UiLogQueue(self._log_queue)
@@ -1392,242 +1309,208 @@ class LogbotApp(tk.Tk):
         self._controller = BotController()
         self._start_time: Optional[float] = None
 
-        self._build_style()
-        self._build_layout()
-        self._wire_events()
-
-        self.after(100, self._drain_log_queue)
+        self._build_ui()
+        self.after(100, self._drain_log)
         self.after(400, self._update_status)
-
-        log.info(f"base dir: {CFG.base_dir}")
-        log.info(f"docs dir: {CFG.docs_dir}")
-        log.info(f"log file: {CFG.log_file}")
-
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _build_style(self):
-        style = ttk.Style(self)
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
+        log.info(f"project root: {PROJECT_ROOT}")
+        log.info(f"log file: {LOG_FILE}")
 
-        bg = "#1e1f22"
-        fg = "#e6e6e6"
-        accent = "#4a9eff"
-        accent_hover = "#6fb4ff"
-        panel = "#2a2c30"
-        border = "#3a3d43"
+    def _build_ui(self):
+        outer = tk.Frame(self, bg=Palette.bg)
+        outer.pack(fill="both", expand=True, padx=18, pady=18)
 
-        style.configure(".", background=bg, foreground=fg, fieldbackground=panel)
-        style.configure("TFrame", background=bg)
-        style.configure("TLabel", background=bg, foreground=fg, font=("Segoe UI", 10))
-        style.configure("TButton", background=panel, foreground=fg, borderwidth=0,
-                        focusthickness=0, padding=(12, 8), font=("Segoe UI", 10))
-        style.map("TButton",
-                  background=[("active", border), ("disabled", panel)],
-                  foreground=[("disabled", "#7a7a7a")])
-        style.configure("Accent.TButton", background=accent, foreground="#ffffff",
-                        font=("Segoe UI", 10, "bold"))
-        style.map("Accent.TButton",
-                  background=[("active", accent_hover), ("disabled", panel)])
-        style.configure("Stop.TButton", background="#c9484b", foreground="#ffffff",
-                        font=("Segoe UI", 10, "bold"))
-        style.map("Stop.TButton",
-                  background=[("active", "#e05a5d"), ("disabled", panel)])
-        style.configure("TEntry", fieldbackground=panel, foreground=fg,
-                        insertcolor=fg, bordercolor=border, lightcolor=border, darkcolor=border)
-        style.configure("TCombobox", fieldbackground=panel, background=panel,
-                        foreground=fg, arrowcolor=fg)
-        style.configure("TLabelframe", background=bg, foreground=fg,
-                        bordercolor=border, relief="solid")
-        style.configure("TLabelframe.Label", background=bg, foreground=accent,
-                        font=("Segoe UI", 10, "bold"))
-        style.configure("Status.TLabel", font=("Segoe UI", 10, "bold"))
+        header = tk.Frame(outer, bg=Palette.bg)
+        header.pack(fill="x", pady=(0, 14))
 
-    def _build_layout(self):
-        outer = ttk.Frame(self, padding=16)
-        outer.pack(fill="both", expand=True)
-
-        header = ttk.Frame(outer)
-        header.pack(fill="x", pady=(0, 12))
-        ttk.Label(header, text="LogBot",
-                  font=("Segoe UI", 20, "bold")).pack(side="left")
-        ttk.Label(header, text="human-supervised desktop automation",
-                  font=("Segoe UI", 10, "italic"),
-                  foreground="#9a9a9a").pack(side="left", padx=(10, 0))
+        tk.Label(header, text="WebDevBot",
+                 bg=Palette.bg, fg=Palette.text,
+                 font=("Segoe UI Semibold", 20)).pack(side="left")
+        tk.Label(header, text="  code-typing automation for html / css / js",
+                 bg=Palette.bg, fg=Palette.text_dim,
+                 font=("Segoe UI", 10)).pack(side="left", padx=(10, 0))
 
         self._status_var = tk.StringVar(value="Idle")
-        self._status_label = ttk.Label(header, textvariable=self._status_var,
-                                       style="Status.TLabel", foreground="#9a9a9a")
+        self._status_label = tk.Label(
+            header, textvariable=self._status_var,
+            bg=Palette.bg, fg=Palette.text_dim,
+            font=("Segoe UI Semibold", 10),
+        )
         self._status_label.pack(side="right")
 
-        controls = ttk.LabelFrame(outer, text=" Session Control ", padding=14)
-        controls.pack(fill="x", pady=(0, 12))
+        body = tk.Frame(outer, bg=Palette.bg)
+        body.pack(fill="both", expand=True)
 
-        row1 = ttk.Frame(controls)
-        row1.pack(fill="x", pady=(0, 10))
+        left = RoundedCard(body, padding=16)
+        left.pack(side="left", fill="both", expand=False, padx=(0, 14))
+        left.configure(width=320)
+        left.pack_propagate(False)
 
-        ttk.Label(row1, text="Duration (hours):").pack(side="left")
+        self.project_panel = ProjectPanel(
+            left.inner, self._tree_data,
+            on_select=self._on_file_selected,
+            on_change=self._on_tree_changed,
+        )
+        self.project_panel.pack(fill="both", expand=True)
+
+        right = tk.Frame(body, bg=Palette.bg)
+        right.pack(side="left", fill="both", expand=True)
+
+        editor_card = RoundedCard(right, padding=16)
+        editor_card.pack(fill="both", expand=True, pady=(0, 14))
+
+        self.editor_panel = EditorPanel(
+            editor_card.inner, self._tree_data,
+            on_change=self._on_editor_change,
+        )
+        self.editor_panel.pack(fill="both", expand=True)
+
+        bottom = tk.Frame(right, bg=Palette.bg)
+        bottom.pack(fill="both", expand=False)
+
+        controls_card = RoundedCard(bottom, padding=16)
+        controls_card.pack(side="left", fill="both", expand=True, padx=(0, 14))
+
+        controls = controls_card.inner
+
+        row = tk.Frame(controls, bg=Palette.surface)
+        row.pack(fill="x")
+
+        tk.Label(row, text="Duration (hours)",
+                 bg=Palette.surface, fg=Palette.text_dim,
+                 font=("Segoe UI", 9)).pack(anchor="w")
         self._duration_var = tk.StringVar(value="1")
-        ttk.Entry(row1, textvariable=self._duration_var, width=8).pack(side="left", padx=(8, 20))
-
-        ttk.Label(row1, text="Mode:").pack(side="left")
-        self._mode_var = tk.StringVar(value="sessions")
-        mode_combo = ttk.Combobox(
-            row1,
-            textvariable=self._mode_var,
-            values=("notepad", "explorer", "sessions", "wander"),
-            state="readonly",
-            width=14,
+        dur_entry = tk.Entry(
+            row, textvariable=self._duration_var,
+            bg=Palette.code_bg, fg=Palette.text,
+            insertbackground=Palette.accent,
+            relief="flat", bd=0, width=10,
+            font=("Segoe UI", 11),
         )
-        mode_combo.pack(side="left", padx=(8, 20))
+        dur_entry.pack(anchor="w", pady=(4, 12), ipady=6)
 
-        ttk.Label(row1, text="Idle threshold (s):").pack(side="left")
-        self._idle_var = tk.StringVar(value=str(CFG.idle_threshold))
-        ttk.Entry(row1, textvariable=self._idle_var, width=6).pack(side="left", padx=(8, 0))
+        tk.Label(row, text="Entry file",
+                 bg=Palette.surface, fg=Palette.text_dim,
+                 font=("Segoe UI", 9)).pack(anchor="w")
+        self._entry_var = tk.StringVar(value=self._tree_data.entry)
+        entry_display = tk.Label(
+            row, textvariable=self._entry_var,
+            bg=Palette.surface, fg=Palette.accent,
+            font=("Segoe UI Semibold", 11),
+        )
+        entry_display.pack(anchor="w", pady=(4, 0))
 
-        row2 = ttk.Frame(controls)
-        row2.pack(fill="x")
+        btn_row = tk.Frame(controls, bg=Palette.surface)
+        btn_row.pack(fill="x", pady=(16, 0))
 
-        self._start_btn = ttk.Button(row2, text="Start", style="Accent.TButton",
-                                     command=self._on_start)
+        self._start_btn = StyledButton(
+            btn_row, "Start", self._on_start, variant="accent"
+        )
         self._start_btn.pack(side="left")
-        self._stop_btn = ttk.Button(row2, text="Stop", style="Stop.TButton",
-                                    command=self._on_stop, state="disabled")
-        self._stop_btn.pack(side="left", padx=(8, 0))
-        ttk.Button(row2, text="Open docs folder",
-                   command=self._open_docs).pack(side="left", padx=(16, 0))
-        ttk.Button(row2, text="Open log file",
-                   command=self._open_log).pack(side="left", padx=(8, 0))
-        ttk.Button(row2, text="Refresh docs",
-                   command=self._refresh_docs).pack(side="left", padx=(8, 0))
-        ttk.Button(row2, text="Clear log",
-                   command=self._clear_log).pack(side="left", padx=(8, 0))
-
-        metrics = ttk.LabelFrame(outer, text=" Live Metrics ", padding=14)
-        metrics.pack(fill="x", pady=(0, 12))
-
-        grid = ttk.Frame(metrics)
-        grid.pack(fill="x")
-
-        self._cpu_var = tk.StringVar(value="CPU: -")
-        self._mem_var = tk.StringVar(value="RAM: -")
-        self._uptime_var = tk.StringVar(value="Elapsed: 00:00:00")
-        self._mode_metric_var = tk.StringVar(value="Mode: -")
-        self._docs_var = tk.StringVar(value=f"Docs: {CFG.docs_dir}")
-
-        for i, var in enumerate([self._cpu_var, self._mem_var,
-                                 self._uptime_var, self._mode_metric_var]):
-            ttk.Label(grid, textvariable=var, font=("Consolas", 10)).grid(
-                row=0, column=i, sticky="w", padx=(0, 28)
-            )
-        ttk.Label(grid, textvariable=self._docs_var,
-                  font=("Consolas", 9), foreground="#9a9a9a").grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(6, 0)
+        self._stop_btn = StyledButton(
+            btn_row, "Stop", self._on_stop, variant="danger"
         )
+        self._stop_btn.pack(side="left", padx=(8, 0))
+        self._stop_btn.configure(state="disabled")
 
-        log_frame = ttk.LabelFrame(outer, text=" Live Log ", padding=8)
-        log_frame.pack(fill="both", expand=True)
+        metrics_card = RoundedCard(bottom, padding=16)
+        metrics_card.pack(side="left", fill="both", expand=False)
+        metrics_card.configure(width=280)
+        metrics_card.pack_propagate(False)
+
+        self._cpu_var = tk.StringVar(value="CPU  -")
+        self._mem_var = tk.StringVar(value="RAM  -")
+        self._uptime_var = tk.StringVar(value="Elapsed  00:00:00")
+        self._mode_var = tk.StringVar(value="State  idle")
+
+        for var in (self._cpu_var, self._mem_var, self._uptime_var, self._mode_var):
+            tk.Label(
+                metrics_card.inner, textvariable=var,
+                bg=Palette.surface, fg=Palette.text,
+                font=("Cascadia Code", 10),
+                anchor="w",
+            ).pack(fill="x", pady=2)
+
+        tk.Label(
+            metrics_card.inner, text=f"Root\n{PROJECT_ROOT}",
+            bg=Palette.surface, fg=Palette.text_muted,
+            font=("Segoe UI", 8), justify="left", anchor="w",
+        ).pack(fill="x", pady=(10, 0))
+
+        log_card = RoundedCard(right, padding=16)
+        log_card.pack(fill="both", expand=True, pady=(0, 0))
+
+        tk.Label(log_card.inner, text="Live Log",
+                 bg=Palette.surface, fg=Palette.text_dim,
+                 font=("Segoe UI Semibold", 10),
+                 anchor="w").pack(fill="x", pady=(0, 6))
 
         self._log_text = scrolledtext.ScrolledText(
-            log_frame,
-            wrap="word",
-            bg="#15161a",
-            fg="#d7d7d7",
-            insertbackground="#d7d7d7",
-            font=("Consolas", 9),
-            relief="flat",
-            borderwidth=0,
+            log_card.inner, wrap="word",
+            bg=Palette.code_bg, fg=Palette.code_fg,
+            insertbackground=Palette.accent,
+            font=("Cascadia Code", 9),
+            relief="flat", bd=0,
         )
         self._log_text.pack(fill="both", expand=True)
         self._log_text.configure(state="disabled")
+        self._log_text.tag_configure("INFO", foreground=Palette.code_fg)
+        self._log_text.tag_configure("WARNING", foreground=Palette.warn)
+        self._log_text.tag_configure("ERROR", foreground=Palette.danger)
+        self._log_text.tag_configure("CRITICAL", foreground=Palette.danger_hi)
 
-        self._log_text.tag_configure("INFO", foreground="#d7d7d7")
-        self._log_text.tag_configure("WARNING", foreground="#e6b455")
-        self._log_text.tag_configure("ERROR", foreground="#e05a5d")
-        self._log_text.tag_configure("CRITICAL", foreground="#ff7a7a")
+    def _on_file_selected(self, path: str):
+        self.editor_panel.load(path)
 
-        footer = ttk.Frame(outer)
-        footer.pack(fill="x", pady=(10, 0))
-        ttk.Label(footer,
-                  text="Fail-safe: slam mouse into a corner to abort.  "
-                       "Manual override: any keyboard/mouse input pauses the bot for the idle threshold.",
-                  font=("Segoe UI", 9), foreground="#9a9a9a").pack(side="left")
+    def _on_tree_changed(self):
+        self.editor_panel.refresh_entry_badge()
+        self._entry_var.set(self._tree_data.entry)
 
-    def _wire_events(self):
-        self.bind("<Control-s>", lambda _e: self._on_start())
-        self.bind("<Control-S>", lambda _e: self._on_start())
-        self.bind("<Escape>", lambda _e: self._on_stop())
+    def _on_editor_change(self, path: str, content: str):
+        pass
 
     def _on_start(self):
         if self._controller.is_running():
-            messagebox.showinfo("LogBot", "A session is already running.")
+            messagebox.showinfo("WebDevBot", "A session is already running.")
             return
         try:
-            duration_hours = float(self._duration_var.get())
-            if duration_hours <= 0:
+            hours = float(self._duration_var.get())
+            if hours <= 0:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("LogBot", "Duration must be a positive number.")
+            messagebox.showerror("WebDevBot", "Duration must be a positive number.")
             return
-        try:
-            idle = float(self._idle_var.get())
-            if idle <= 0:
-                raise ValueError
-        except ValueError:
-            messagebox.showerror("LogBot", "Idle threshold must be a positive number.")
+        if not self._tree_data.files:
+            messagebox.showerror("WebDevBot", "Add at least one file.")
+            return
+        if self._tree_data.entry not in self._tree_data.files:
+            messagebox.showerror(
+                "WebDevBot",
+                f"Entry file '{self._tree_data.entry}' is not in the project."
+            )
             return
 
-        CFG.idle_threshold = idle
-        mode = self._mode_var.get()
         self._start_time = time.time()
-        self._mode_metric_var.set(f"Mode: {mode}")
         self._set_running(True)
-        log.info(f"UI start requested: duration={duration_hours}h mode={mode} idle={idle}s")
-        self._controller.start(duration_hours, mode)
+        self._controller.start(self._tree_data, hours)
+        log.info(f"session started - duration {hours}h")
 
     def _on_stop(self):
         if not self._controller.is_running():
             return
-        log.info("UI stop requested")
         self._controller.stop()
-
-    def _open_docs(self):
-        CFG.docs_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            os.startfile(str(CFG.docs_dir))
-        except Exception as e:
-            messagebox.showerror("LogBot", f"Could not open docs folder:\n{e}")
-
-    def _open_log(self):
-        if CFG.log_file.exists():
-            try:
-                os.startfile(str(CFG.log_file))
-                return
-            except Exception as e:
-                messagebox.showerror("LogBot", f"Could not open log:\n{e}")
-        else:
-            messagebox.showinfo("LogBot", "Log file not created yet.")
-
-    def _refresh_docs(self):
-        try:
-            lib = DocLibrary(CFG.docs_dir, CFG.docs_glob)
-            lib.refresh()
-            messagebox.showinfo("LogBot", "Docs refreshed - see log for the count.")
-        except Exception as e:
-            messagebox.showerror("LogBot", f"Refresh failed:\n{e}")
-
-    def _clear_log(self):
-        self._log_text.configure(state="normal")
-        self._log_text.delete("1.0", "end")
-        self._log_text.configure(state="disabled")
+        log.info("session stopped by user")
 
     def _set_running(self, running: bool):
-        self._start_btn.configure(state="disabled" if running else "normal")
-        self._stop_btn.configure(state="normal" if running else "disabled")
+        if running:
+            self._start_btn.configure(state="disabled")
+            self._stop_btn.configure(state="normal")
+        else:
+            self._start_btn.configure(state="normal")
+            self._stop_btn.configure(state="disabled")
 
-    def _drain_log_queue(self):
+    def _drain_log(self):
         drained = 0
         while True:
             try:
@@ -1638,7 +1521,7 @@ class LogbotApp(tk.Tk):
             self._append_log(msg)
             if drained >= 200:
                 break
-        self.after(100, self._drain_log_queue)
+        self.after(100, self._drain_log)
 
     def _append_log(self, msg: str):
         level = "INFO"
@@ -1652,40 +1535,40 @@ class LogbotApp(tk.Tk):
         self._log_text.configure(state="normal")
         self._log_text.insert("end", msg + "\n", level)
         self._log_text.see("end")
-
         line_count = int(self._log_text.index("end-1c").split(".")[0])
-        if line_count > 5000:
-            self._log_text.delete("1.0", f"{line_count - 4000}.0")
-
+        if line_count > 4000:
+            self._log_text.delete("1.0", f"{line_count - 3000}.0")
         self._log_text.configure(state="disabled")
 
     def _update_status(self):
         try:
             cpu = psutil.cpu_percent(interval=None)
             vm = psutil.virtual_memory()
-            self._cpu_var.set(f"CPU: {cpu:5.1f}%")
-            self._mem_var.set(f"RAM: {vm.percent:5.1f}%")
+            self._cpu_var.set(f"CPU  {cpu:5.1f}%")
+            self._mem_var.set(f"RAM  {vm.percent:5.1f}%")
         except Exception:
-            self._cpu_var.set("CPU: -")
-            self._mem_var.set("RAM: -")
+            pass
 
         if self._start_time is not None and self._controller.is_running():
             elapsed = int(time.time() - self._start_time)
             self._uptime_var.set(
-                f"Elapsed: {elapsed // 3600:02d}:{(elapsed % 3600) // 60:02d}:{elapsed % 60:02d}"
+                f"Elapsed  {elapsed // 3600:02d}:{(elapsed % 3600) // 60:02d}:{elapsed % 60:02d}"
             )
         elif not self._controller.is_running():
-            self._uptime_var.set("Elapsed: 00:00:00")
+            self._uptime_var.set("Elapsed  00:00:00")
 
         state = self._controller.state()
-        colors = {
-            "idle": "#9a9a9a",
-            "starting": "#e6b455",
-            "running": "#6fc07a",
-            "stopping": "#e6b455",
-        }
         self._status_var.set(state.capitalize())
-        self._status_label.configure(foreground=colors.get(state, "#9a9a9a"))
+        self._mode_var.set(f"State  {state}")
+
+        colors = {
+            "idle": Palette.text_dim,
+            "starting": Palette.warn,
+            "running": Palette.success,
+            "wandering": Palette.accent,
+            "stopping": Palette.warn,
+        }
+        self._status_label.configure(fg=colors.get(state, Palette.text_dim))
 
         if not self._controller.is_running() and str(self._stop_btn["state"]) == "normal":
             self._set_running(False)
@@ -1695,7 +1578,7 @@ class LogbotApp(tk.Tk):
 
     def _on_close(self):
         if self._controller.is_running():
-            if not messagebox.askyesno("LogBot", "A session is running. Stop it and exit?"):
+            if not messagebox.askyesno("WebDevBot", "A session is running. Stop and exit?"):
                 return
             self._controller.stop()
             deadline = time.time() + 5.0
@@ -1710,8 +1593,8 @@ class LogbotApp(tk.Tk):
 
 def main() -> None:
     log.info("=" * 60)
-    log.info("logbot (UI) starting")
-    app = LogbotApp()
+    log.info("webdevbot starting")
+    app = WebDevBotApp()
     app.mainloop()
 
 
